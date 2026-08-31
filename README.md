@@ -1,4 +1,4 @@
-# beauty_agent — RAG 智能导购
+# 基于Harness架构的beauty_agent — RAG 智能导购
 
 一个**可真实使用的 AI 粉底导购**：基于 Amazon Beauty 真实商品与真实评论区构建检索底座，用「规则为主 + LLM 兜底」的方式做**确定性、可解释、诚实**的推荐。既是一个能跑的 Web 演示，也是一套带完整评测闭环的 RAG 工程样例。
 
