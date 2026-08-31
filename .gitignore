@@ -1,0 +1,56 @@
+# ===== 密钥：绝不入库 =====
+scripts/.env
+
+# ===== 模型：133MB 本地文件，README 中有下载方式 =====
+models/
+
+# ===== 运行态数据 / 缓存 / 用户画像（本地运行自动生成）=====
+data/user_profiles.json
+data/harness_trace.jsonl
+data/llm_cache.json
+data/title_translation_cache.json
+data/translate_cache.json
+data/*.log
+
+# ===== 编译 / 调试残留 =====
+__pycache__/
+*.pyc
+scripts/_*.py
+scripts/_*.txt
+scripts/_*.log
+scripts/_*.json
+
+# ===== 一次性辅助脚本（环境相关 / 历史迭代，不对外）=====
+scripts/load_mysql.py
+scripts/load_review_mysql.py
+scripts/load_eval_mysql.py
+scripts/download_bge.py
+scripts/parallel_download.py
+scripts/build_eval_set.py
+scripts/extract_queries.py
+scripts/augment_eval_set.py
+scripts/enhance_extras_implicit.py
+scripts/add_hidden_intent_cases.py
+scripts/relabel_q7_gold.py
+scripts/sim_label_patch.py
+scripts/apply_label_patch.py
+scripts/retest_phase1_tagfirst.py
+scripts/feedback_to_eval.py
+scripts/coverage_extract.py
+scripts/translate_titles.py
+scripts/shade_tag_extract.py
+scripts/grid_scan.py
+scripts/sync_avoid_review.py
+scripts/build_candidate_pool.py
+scripts/diag_anchor_drift.py
+scripts/diag_system_layer.py
+scripts/prep_human_gold_check.py
+
+# ===== 中间产物数据 / 草稿 =====
+data/products_clean.xlsx
+data/products_clean_sim.csv
+data/evaluation_set.csv
+data/review_scores.csv
+data/candidate_pool.csv
+docs/eval_v2_batch4_draft.md
+docs/ec_commercial_narrative.md

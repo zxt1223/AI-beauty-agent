@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>beauty_agent AI 导购</title>
+<style>
+  :root {
+    --bg: #f5f3f0; --panel: #ffffff; --ink: #2b2b2b; --muted: #8a8578;
+    --brand: #e05a8a; --brand-soft: #fdeef4; --accent: #3b82c4;
+    --good: #2e9e5b; --warn: #d98e2b; --bad: #d9534f; --line: #e8e3da;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--ink); display: flex; flex-direction: column;
+  }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; display: flex; align-items: center; gap: 8px; }
+  header h1 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--good); }
+  header h1 .dot.off { background: var(--bad); }
+  .spacer { flex: 1; }
+  .ghost-btn {
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+    padding: 5px 12px; border-radius: 999px; font-size: 13px; cursor: pointer;
+  }
+  .ghost-btn:hover { color: var(--ink); border-color: #ccc; }
+
+  #chat { flex: 1; overflow-y: auto; padding: 18px 16px 8px; }
+  #chat .inner { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+
+  .row { display: flex; gap: 10px; }
+  .row.user { justify-content: flex-end; }
+  .avatar {
+    width: 30px; height: 30px; border-radius: 50%; flex: none;
+    display: flex; align-items: center; justify-content: center; font-size: 15px;
+  }
+  .row.user .avatar { background: var(--brand); color: #fff; }
+  .row.bot .avatar { background: #fff; border: 1px solid var(--line); }
+
+  .bubble { max-width: 78%; padding: 10px 13px; border-radius: var(--radius); font-size: 14px; line-height: 1.65; }
+  .row.user .bubble { background: var(--brand); color: #fff; border-top-right-radius: 4px; white-space: pre-wrap; }
+  .row.bot .bubble { background: var(--panel); border: 1px solid var(--line); border-top-left-radius: 4px; }
+  .bubble .meta { font-size: 11px; color: var(--muted); margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-top: 10px; }
+  .card {
+    background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 5px; font-size: 13px;
+  }
+  .card .rank { color: var(--brand); font-weight: 800; font-size: 12px; }
+  .card .title { font-weight: 700; line-height: 1.35; }
+  .card .tags { color: var(--muted); font-size: 12px; }
+  .card .row2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .badge { padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge.in { background: #e5f6ec; color: var(--good); }
+  .badge.over1 { background: #fdf2e0; color: var(--warn); }
+  .badge.over { background: #fdeaea; color: var(--bad); }
+  .badge.wait { background: #eee; color: var(--muted); }
+  .heat { color: var(--muted); font-size: 11px; }
+  .citation { font-size: 11px; color: var(--accent); }
+  .honest { font-size: 11px; color: var(--warn); }
+  .card a { color: var(--accent); text-decoration: none; font-size: 11px; }
+  .card a:hover { text-decoration: underline; }
+
+  /* 2026-08-31 用户：AI 回答文字里的推荐块改成表格，更直观。
+     表格内容与卡片同源（rec.recommendations 结构化证据），后端正文不动。 */
+  .sq { color: var(--accent); margin-top: 6px; }
+  /* 对话意图闸门回执（2026-08-31 用户定标）：置信度分支徽章 + LLM 人性化应答 */
+  .gate-badge { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 8px;
+                padding: 3px 10px; margin-bottom: 8px; }
+  .gate-badge.auto   { color: var(--accent); background: #eef5fc; }
+  .gate-badge.review { color: var(--warn);   background: #fdf6e8; }
+  .gate-badge.human  { color: var(--bad);    background: #fdf3f3; }
+  .gate-text { font-size: 14px; line-height: 1.75; white-space: pre-wrap; }
+
+  .avoid { font-size: 12px; color: var(--bad); margin-top: 8px; background: #fdf3f3; border-radius: 8px; padding: 6px 10px; }
+  .fallback { font-size: 13px; color: var(--warn); margin-top: 8px; background: #fdf6e8; border-radius: 8px; padding: 6px 10px; white-space: pre-wrap; }
+  .lang-note { font-size: 12px; color: var(--accent); background: #eef5fc; border-radius: 8px; padding: 4px 10px; margin-bottom: 8px; display: inline-block; }
+  .search-note { font-size: 12px; color: var(--accent); background: #eff8f0; border: 1px dashed var(--accent); border-radius: 8px; padding: 4px 10px; margin-bottom: 8px; display: inline-block; }
+  .typing .srch { font-size: 12px; color: var(--muted); margin-right: 6px; }
+
+  .fb { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .fb-btn {
+    border: 1px solid var(--line); background: var(--panel); border-radius: 999px;
+    padding: 3px 12px; font-size: 12px; cursor: pointer; color: var(--ink); transition: all .15s;
+  }
+  .fb-btn:hover { border-color: var(--brand); color: var(--brand); }
+  .fb-btn:disabled { opacity: .45; cursor: default; }
+  .fb-btn.up.lit { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); }
+  .fb-btn.down.lit { background: #fdeaea; border-color: var(--bad); color: var(--bad); }
+  .fb-note {
+    flex: 1; min-width: 140px; border: 1px solid var(--line); border-radius: 999px;
+    padding: 4px 12px; font-size: 12px; outline: none; background: #fff;
+  }
+  .fb-note:focus { border-color: var(--brand); }
+
+  .softq { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .softq-btn { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+
+  details.trans {
+    margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 6px; font-size: 12px;
+  }
+  details.trans summary { cursor: pointer; color: var(--muted); user-select: none; }
+  details.trans table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  details.trans td { padding: 2px 6px; vertical-align: top; }
+  details.trans td.k { color: var(--muted); white-space: nowrap; width: 76px; }
+
+  .chip {
+    border: 1px solid var(--line); background: var(--panel); border-radius: 999px;
+    padding: 4px 12px; font-size: 12px; color: var(--muted); cursor: pointer;
+    transition: all .15s;
+  }
+  .chip:hover { color: var(--brand); border-color: var(--brand); }
+  /* 开场选项面板（2026-08-31 用户定：开头问 肤质/预算/妆效，选项供点选） */
+  .opt-panel { margin-top: 10px; }
+  .opt-head { font-size: 13px; color: var(--ink); margin-bottom: 8px; }
+  .opt-group { margin-bottom: 8px; }
+  .opt-label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .opt-opts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip.sel { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); font-weight: 600; }
+  .opt-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .opt-go { background: var(--brand); color: #fff; border-color: var(--brand); font-weight: 600; }
+  .opt-go:hover { background: var(--brand); color: #fff; }
+  .opt-skip { background: var(--panel); color: var(--muted); }
+
+  footer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 16px; }
+  .input-bar { max-width: 860px; margin: 0 auto; display: flex; gap: 8px; }
+  #input {
+    flex: 1; border: 1px solid var(--line); border-radius: 999px; padding: 10px 18px;
+    font-size: 14px; outline: none; background: #fff;
+  }
+  #input:focus { border-color: var(--brand); }
+  #send {
+    border: none; background: var(--brand); color: #fff; border-radius: 999px;
+    padding: 0 22px; font-size: 14px; cursor: pointer; font-weight: 600;
+  }
+  #send:disabled { opacity: .5; cursor: default; }
+  .typing { display: flex; gap: 4px; padding: 6px 2px; }
+  .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
+  .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%,80%,100% { opacity: .25; } 40% { opacity: 1; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot" id="dot"></span> 🛍️ beauty_agent · <span id="headTitle">AI 粉底导购</span></h1>
+  <span style="font-size:12px;color:var(--muted);" id="status">连接中…</span>
+  <span class="spacer"></span>
+  <button class="ghost-btn" id="clearBtn">清空对话</button>
+</header>
+
+<div id="chat"><div class="inner" id="inner"></div></div>
+
+<footer>
+  <div class="input-bar">
+    <input id="input" placeholder="输入你的需求（任意语种）/ Type your needs — any language works" autocomplete="off">
+    <button id="send">发送</button>
+  </div>
+</footer>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const inner = $("#inner"), chat = $("#chat"), input = $("#input");
+let baseQuery = null;       // 累积的完整需求上下文（每轮追加，推荐完不重置）
+let lastRecs = [];          // 上一轮推荐的卡片数据（多轮追问「对比/色号」时把 asin 传给后端意图闸门）
+let convo = [];             // 对话记忆层：用户+AI 双方消息，每轮传后端 → 闸门看得到「AI 上一条说了什么」
+let busy = false;
+let uiLang = "zh";          // 界面语言：用户记忆语言 → 后端 profile.lang / data.lang 驱动
+const T = (zh, en) => (uiLang === "en" ? en : zh);   // 前端 i18n
+
+/* ---------- 跨会话用户记忆（匿名 userId + 服务端画像） ----------
+   userId 存 localStorage：重开聊天框仍是同一用户 → 语言/肤质记忆都在。
+   clearBtn 只清对话气泡，不清 userId（清对话不丢记忆）。 */
+const USER_ID = (() => {
+  let v = localStorage.getItem("beauty_user_id");
+  if (!v) { v = "u_" + Math.random().toString(36).slice(2, 10); localStorage.setItem("beauty_user_id", v); }
+  return v;
+})();
+const MEMORY_GAP_MS = 24 * 3600 * 1000;   // 隔多久算「好久不见」（演示可临时改小）
+
+/* ---------- 对话渲染 ---------- */
+/* esc 必须先 String 强转：预算这类数字字段（10.0）直接 .replace 会 TypeError
+   导致「预算 10 美金以内」直接宕机（三条反馈之三）。null/undefined/数字一律安全。 */
+function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+function addBubble(role, html){
+  const row = document.createElement("div");
+  row.className = "row " + role;
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = role === "user" ? "我" : "AI";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.innerHTML = html;
+  row.append(avatar, bubble);
+  inner.appendChild(row);
+  chat.scrollTop = chat.scrollHeight;
+  return row;   // 返回整行：showTyping 移除时连带头像一起删（不然每轮残留一个空头像行）
+}
+
+function heatBadge(h){
+  // 2026-08-31 用户：热度「低」不展示（低热销商品不打 🔥 标签，高/中照常显示）
+  if (h === "低" || h === "low") return "";
+  return `<span class="heat">🔥 ${esc(h)}</span>`;
+}
+
+function productCards(rec){
+  const html = rec.recommendations.map((r, i) => {
+    const e = r.evidence;
+    let badge = "";
+    if (e.budget_status === "预算内") badge = `<span class="badge in">预算内</span>`;
+    else if (String(e.budget_status).startsWith("微超")) badge = `<span class="badge over1">${esc(e.budget_status)}</span>`;
+    else if (e.budget_status === "超预算") badge = `<span class="badge over">超预算</span>`;
+    else if (e.budget_status === "待核实") badge = `<span class="badge wait">待核实</span>`;
+    const asin = esc(r.asin);
+    const honest = (e.honest||[]).map(h => `<div class="honest">⚠️ ${esc(h)}</div>`).join("");
+    // 缺价不显示（后端已把 e.price 置空），绝不出「价格待核实」
+    const priceHtml = e.price ? `<span>${esc(e.price)}</span>` : "";
+    return `<div class="card">
+      <div class="rank">No.${i+1}</div>
+      <div class="title">${esc(r.title_zh || r.title)}</div>
+      <div class="tags">${esc(e.tags)}</div>
+      <div class="row2">${priceHtml}${badge}<span>${esc(e.rating)}</span>${heatBadge(e.heat)}</div>
+      <div class="citation">${esc(e.citation)}</div>
+      ${honest}
+      <a href="https://www.amazon.com/dp/${asin}" target="_blank" rel="noopener">🛒 查看商品 →</a>
+    </div>`;
+  }).join("");
+  return `<div class="cards">${html}</div>`;
+}
+
+// 2026-08-31 用户定标：多轮追问的「区别/色号/求助」全部交给后端对话意图闸门（llm_gate）——
+// 后端用库内真实数据（差评主题/色号标签/评分条数）+ LLM 生成人性化解说，而不是前端硬拼表格。
+// 本地对比表（renderCompareTable）已废弃删除。
+
+// 2026-08-31 用户：AI 回答文字里的推荐块改成表格渲染（更直观）。
+// 表格内容直接取结构化 recommendations（与卡片同源），回复正文的编号列表只取「导语」部分；
+// 后端 agent._build_reply 不动 → 锚点（首答 94.7% / CONTRACT 105/105）零影响。
+// 兜底：没有编号块/没有推荐时原样渲染正文，行为与之前完全一致。
+function replyTable(rec){
+  const recs = rec.recommendations || [];
+  if (!recs.length) return esc(rec.reply).replace(/\n/g, "<br>");
+  const lines = (rec.reply || "").split("\n");
+  const i0 = lines.findIndex(l => /^\d+\.\s/.test(l));
+  if (i0 < 0) return esc(rec.reply).replace(/\n/g, "<br>");
+  // 干净版（2026-08-31 用户定稿）：正文只留「导语 + 💡 软追问」两行——
+  // 商品名/特点/口碑/价格全部由下方卡片承载，正文不出现任何编号商品列表。
+  let pre = lines.slice(0, i0);
+  pre = pre.filter(l => !/先按已有条件|First pass below/.test(l));   // 占位话术永不呈现
+  const qHint = lines.slice(i0).find(l => l.startsWith("💡")) || "";   // 软追问文本，紧跟导语
+  const preHtml = pre.length ? `<div>${esc(pre.join("\n")).replace(/\n/g, "<br>")}</div>` : "";
+  const hintHtml = qHint ? `<div class="sq">${esc(qHint)}</div>` : "";
+  return preHtml + hintHtml;
+}
+
+// 2026-08-31 用户定标：对话意图闸门回执（置信度分支 + LLM 人性化应答）。
+//   auto   置信度 >85%      → 「✨ 置信度 X% · 直接回答」
+//   review 置信度 60~85%    → 「🤔 置信度 X% · 人工复核中」（回答照出，附复核徽章）
+//   human  置信度 <60%      → 「👤 已转人工客服」（不生成回答）
+function gateHtml(g){
+  const en = uiLang === "en";
+  let badge;
+  if (g.route === "human") {
+    badge = `<div class="gate-badge human">👤 ${en ? "Handed to a human agent" : "已转人工客服"}</div>`;
+  } else if (g.route === "review") {
+    badge = `<div class="gate-badge review">🤔 ${en
+      ? `Confidence ${g.confidence}% · human review`
+      : `置信度 ${g.confidence}% · 人工复核中`}</div>`;
+  } else {
+    badge = `<div class="gate-badge auto">✨ ${en
+      ? `Confidence ${g.confidence}% · direct answer`
+      : `置信度 ${g.confidence}% · 直接回答`}</div>`;
+  }
+  return badge + `<div class="gate-text">${esc(g.text).replace(/\n/g, "<br>")}</div>`;
+}
+
+function fallbackBlock(rec){
+  if(!rec.fallback || !rec.fallback.triggered) return "";
+  const alt = (rec.fallback.alternatives||[]).map(a => esc(a.title)).join("、");
+  return `<div class="fallback">🫴 ${esc(rec.fallback.message)}${alt ? "<br>替代方向：" + alt : ""}</div>`;
+}
+
+function decisionTable(rec, elapsed, traceId){
+  const en = uiLang === "en";
+  const c = rec.constraints || {};
+  const pick = obj => Object.entries(obj).filter(([k,v]) => v !== null && v !== "" && v !== false && !(Array.isArray(v) && v.length===0));
+  const L = en ? { 肤质硬约束:"Skin (hard)", 肤质软偏好:"Skin (soft)", 妆效:"Finish", 遮瑕:"Coverage", 质地:"Texture", 色号:"Shade", 预算:"Budget", 隐式意图:"Implicit", 避雷轴:"Avoid", 需求理解:"Understood", 追问:"Ask", 改写重试:"Rewrite", 触发:"triggered: ", 未触发:"not triggered", 驾驭层:"Harness trace" }
+               : { 肤质硬约束:"肤质硬约束", 肤质软偏好:"肤质软偏好", 妆效:"妆效", 遮瑕:"遮瑕", 质地:"质地", 色号:"色号", 预算:"预算", 隐式意图:"隐式意图", 避雷轴:"避雷轴", 需求理解:"需求理解", 追问:"追问", 改写重试:"改写重试", 触发:"触发：", 未触发:"未触发", 驾驭层:"驾驭层埋点" };
+  // 预算显示成 $10：数字直接 esc 也安全（esc 已 String 强转），但带 $ 更易懂
+  const rows = pick({ [L.肤质硬约束]:c.hard, [L.肤质软偏好]:c.soft, [L.妆效]:c.finish, [L.遮瑕]:c.coverage, [L.质地]:c.form,
+      [L.色号]: c.shade_dir ? c.shade_dir : (c.shade_stated ? (en?"stated":"已说（色号）") : null),
+      [L.预算]:(c.budget==null?null:"$"+Math.round(c.budget)), [L.隐式意图]:c.implicit, [L.避雷轴]:c.negative_axes })
+    .map(([k,v]) => `<tr><td class="k">${k}</td><td>${esc(Array.isArray(v)?v.join("、"):v)}</td></tr>`).join("");
+  const ev = rec.llm_evidence ? `<tr><td class="k">${L.需求理解}</td><td>${esc(rec.llm_evidence)}</td></tr>` : "";
+  const sep = en ? ": " : "：";
+  return `<details class="trans"><summary>🔍 ${en ? "why these picks" : "本次推荐依据"} · ${elapsed}ms</summary>
+    <table>${rows}${ev}
+    <tr><td class="k">${L.追问}</td><td>${esc(rec.ask.decision)}${rec.ask.questions?.length? sep + esc(rec.ask.questions.join(" / ")) : ""}</td></tr>
+    <tr><td class="k">${L.改写重试}</td><td>${rec.retry.triggered ? L.触发 + esc(rec.retry.rewrite) : L.未触发}</td></tr>
+    ${traceId ? `<tr><td class="k">${L.驾驭层}</td><td>${esc(traceId)}</td></tr>` : ""}
+    </table></details>`;
+}
+
+/* ---------- 对话逻辑 ---------- */
+/* 最低「正在搜索」时长：0.04s 答完像固定回复（三条反馈之一）。真实检索 2-3s 正常，
+   这 2-3s 让用户看到「🔍 正在搜索…」+ 之后 search_note 的筛出过程，响应更可信。 */
+const MIN_TYPING_MS = 2200;
+function showTyping(){
+  const b = addBubble("bot", `<div class="typing"><span class="srch">🔍 ${T("正在搜索…","Searching…")}</span><i></i><i></i><i></i></div>`);
+  return b;
+}
+
+/* 反馈闭环（AI Native）：这个推荐对吗？👍/👎 + 可选补充 → POST /api/feedback
+   落盘 ui_feedback.jsonl → 后续 feedback_to_eval.py 转 MySQL 待审表 → 人工确认回灌 gold */
+function feedbackRow(query, rec){
+  const row = document.createElement("div");
+  row.className = "fb";
+  row.innerHTML = `<span>${T("这个推荐对吗？","Was this helpful?")}</span>
+    <button class="fb-btn up">👍 ${T("有帮助","Helpful")}</button>
+    <button class="fb-btn down">👎 ${T("不太对","Not quite")}</button>
+    <input class="fb-note" placeholder="${T("想补充什么？选完按钮再输入（可选）","Add a note (optional)")}">`;
+  const submit = (vote) => {
+    row.querySelectorAll(".fb-btn").forEach(b => b.disabled = true);
+    row.querySelector(".fb-note").style.display = "none";
+    fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        asins: rec.recommendations.map(r => r.asin),
+        reply: rec.reply,
+        vote,
+        note: row.querySelector(".fb-note").value,
+      }),
+    }).then(r => r.json()).then(d => {
+      row.querySelector("span").textContent = d.ok ? T("已收到反馈，谢谢你帮我变聪明 🙂","Thanks — that helps me get smarter 🙂") : T("反馈发送失败","Failed to send");
+    }).catch(() => { row.querySelector("span").textContent = T("反馈发送失败","Failed to send"); });
+  };
+  row.querySelector(".up").onclick = () => { row.querySelector(".up").classList.add("lit"); submit("up"); };
+  row.querySelector(".down").onclick = () => { row.querySelector(".down").classList.add("lit"); submit("down"); };
+  return row;
+}
+
+/* 边问边推荐：推荐的同时弹一个偏好问题（如「你喜欢什么妆感？」），选项做成可点击 chips。
+   点选项 = 在原需求后追加「User says: 选项」再问一轮（baseQuery 保留原需求） */
+function softQuestionRow(query, sq){
+  const row = document.createElement("div");
+  row.className = "softq";
+  row.innerHTML = `<span>${esc(sq.text)}</span>`
+    + sq.options.map((o, i) => `<button class="chip softq-btn" data-o="${esc(o)}">${esc(o)}</button>`).join("");
+  row.querySelectorAll(".softq-btn").forEach(b => {
+    b.onclick = () => {
+      // 2026-08-31：不再重置 baseQuery——答案直接追加到完整上下文（send() 统一拼接）
+      input.value = b.getAttribute("data-o");
+      send();
+    };
+  });
+  return row;
+}
+
+async function send(){
+  const text = input.value.trim();
+  if (!text || busy) return;
+  // 多轮：每轮都保留完整上下文——原需求 + 「User says: 后续」一直拼下去，
+  // 推荐完之后下一句不重置（2026-08-31 用户确认「前端每轮拼上下文」），
+  // 这样水光/预算/肤质在后续轮次不丢；换话题时新显式约束按 Agent 提取顺序覆盖旧约束。
+  let query;
+  if (baseQuery === null) { baseQuery = text; query = text; }
+  else { query = baseQuery + " User says: " + text; }
+
+  addBubble("user", esc(text));
+  input.value = "";
+  input.disabled = true; $("#send").disabled = true;
+  busy = true;
+  const t0 = Date.now();
+  const typing = showTyping();
+
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query, user_id: USER_ID,
+        // 多轮追问传上一轮推荐的商品 asin → 后端对话意图闸门（对比/色号/求助）取数用
+        last_asins: lastRecs.map(r => r.asin),
+        // 对话记忆层：最近 N 轮双方（用户+AI）消息 → 后端闸门看得到「AI 上一条问了什么」
+        convo: convo.slice(-8),
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) { typing.remove(); addBubble("bot", "⚠️ " + esc(data.error)); return; }
+    // 真实检索 2-3s 正常：即使后端 30ms 就返回，也把「正在搜索」撑到至少 2.2s 再亮答案
+    // （太快像固定回复）。错误路径不等待，快速报错。
+    const remain = MIN_TYPING_MS - (Date.now() - t0);
+    if (remain > 0) await new Promise(r => setTimeout(r, remain));
+    typing.remove();
+    // 对话意图闸门回执（对比/色号/求助/闲聊/转人工）——不产生新推荐，lastRecs 保持不变
+    if (data.gate) {
+      uiLang = (data.profile && data.profile.lang)
+        ? (data.profile.lang === "zh" ? "zh" : "en")
+        : (data.lang === "zh" ? "zh" : "en");
+      $("#headTitle").textContent = T("AI 粉底导购", "AI Foundation Guide");
+      let html = gateHtml(data.gate);
+      if (data.medical_note) html += `<div class="lang-note">${esc(data.medical_note)}</div>`;
+      addBubble("bot", html);
+      // 对话记忆层：双方消息都记（用户说了什么 + AI 回了什么），供后端闸门下轮看上下文
+      convo.push({ role: "user", text }, { role: "ai", text: data.gate.text || "" });
+      return;   // finally 复位 busy
+    }
+    const rec = data.rec;
+    // 记录本轮推荐，供下一轮「这三款有什么区别」本地对比
+    if (rec.recommendations && rec.recommendations.length) lastRecs = rec.recommendations;
+    // 界面语言：优先跟用户记忆语言（reply_lang），兜底跟本轮 query 语言
+    uiLang = (data.profile && data.profile.lang)
+      ? (data.profile.lang === "zh" ? "zh" : "en")
+      : (data.lang === "zh" ? "zh" : "en");
+    $("#headTitle").textContent = T("AI 粉底导购", "AI Foundation Guide");
+    // 回复正文 + 卡片 + 避雷 + 兜底 + 决策透明
+    let html = "";
+    // 语言桥提示：其他语种需求已被翻译成英文再走规则检索（让用户信任系统听懂了自己）
+    if (data.translated) {
+      html += `<div class="lang-note">🌐 ${esc(data.translated)}</div>`;
+    }
+    // 跨会话记忆提示：本轮自动采用了用户上次说过的肤质（让用户感知「记住了我」）
+    if (data.memory_applied) {
+      const mskins = ((data.rec.memory || {}).skins || []).join("、");
+      html += `<div class="lang-note">🪄 ${uiLang === "en"
+        ? `Using your last-mentioned skin (${mskins})`
+        : `已按您上次说的肤质（${mskins}）筛选`}</div>`;
+    }
+    // 医疗越界免责（驾驭层护栏） + 会话预算降级说明：附在回复外，不改 agent 正文
+    // （2026-08-31 用户定：search_note「已从N款中筛出M款」不用呈现——搜索过程由
+    //   2.2s「正在搜索…」提示承担，回复正文保持干净）
+    if (data.medical_note) html += `<div class="lang-note">${esc(data.medical_note)}</div>`;
+    if (data.budget_warning) html += `<div class="lang-note">${esc(data.budget_warning)}</div>`;
+    if (rec.recommendations && rec.recommendations.length) {
+      // 2026-08-31 用户定稿（干净版）：正文只留「导语 + 💡软追问」两行，
+      // 商品/特点/口碑/价格全部由下方卡片承载，正文不出现编号商品列表
+      html += replyTable(rec) + productCards(rec);
+    } else {
+      html += esc(rec.reply).replace(/\n/g, "<br>");
+    }
+    // 2026-08-31 用户定：avoidBlock「已避开」不用呈现——排除逻辑保留（差评/妆效不符不推），
+    // 但不在回复里刷一整排排除原因，正文保持干净。fallback（诚实兜底）与透明面板保留。
+    html += fallbackBlock(rec) + decisionTable(rec, data.elapsed_ms, data.trace_id);
+    const botRow = addBubble("bot", html);
+    // 只对「真推荐了商品」的回合出现：边问边推荐选项 → 反馈闭环按钮
+    if (rec.recommendations && rec.recommendations.length) {
+      const bubble = botRow.querySelector(".bubble");
+      if (rec.soft_question) bubble.appendChild(softQuestionRow(query, rec.soft_question));
+      bubble.appendChild(feedbackRow(query, rec));
+    }
+    // 对话记忆层：推荐/软追问路径也记双方消息（用户的话 + AI 的回复+软追问）
+    convo.push({ role: "user", text },
+      { role: "ai", text: (rec.reply || "") + ((rec.soft_question && rec.soft_question.text) ? "\n" + rec.soft_question.text : "") });
+    // 2026-08-31：推荐完不重置 baseQuery——完整上下文跨轮保留（用户确认：前端每轮拼上下文）
+  } catch (e) {
+    typing.remove();
+    addBubble("bot", "⚠️ " + T("网络或服务异常","Network or service error") + "：" + esc(String(e)));
+  } finally {
+    busy = false; input.disabled = false; $("#send").disabled = false;
+    input.focus(); chat.scrollTop = chat.scrollHeight;
+  }
+}
+
+$("#send").addEventListener("click", send);
+input.addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+$("#clearBtn").addEventListener("click", () => {
+  inner.innerHTML = ""; baseQuery = null; lastRecs = []; convo = [];
+  addBubble("bot", "👋 " + T("已清空。直接输入你的需求（中英文都行）。","Cleared. Just type your needs — any language works."));
+});
+
+/* ---------- 健康检查 ---------- */
+fetch("/health").then(r => r.json()).then(d => {
+  $("#dot").className = "dot";
+  $("#status").textContent = d.hybrid_key ? "服务在线" : "服务在线 · 部分功能受限";
+}).catch(() => {
+  $("#dot").className = "dot off";
+  $("#status").textContent = "服务异常";
+});
+
+/* ---------- 开场选项面板（2026-08-31 用户定）：开头直接给 肤质/预算/妆效 三组选项 ----------
+   肤质（可多选）：混油/混干/痘肌/敏感肌/冬混干夏混油（季节项，与单肤质互斥）
+   预算（单选，按库价分位四段）：<$15 / $15–25 / $25–40 / $40+
+   妆效（单选）：水光/自然/哑光
+   点「👌 按这个推荐」→ 组装成自然语言 query 自动发送（走既有中文/英文规则层，零后端改动）；
+   点「✍️ 我自己说」→ 收起面板，自由输入。
+   组装边界：预算档取档位上限（$25–40 → 「预算40美元以内」，≤上限硬过滤）；
+   $40+ 无「≥」语义 → 不传预算数字（高价位意图，检索不设上限），避免误伤。 */
+const OPEN_OPTIONS = {
+  skin: [
+    { v: "混油", en: "Combo-oily" },
+    { v: "混干", en: "Combo-dry" },
+    { v: "痘肌", en: "Acne-prone" },
+    { v: "敏感肌", en: "Sensitive" },
+    { v: "冬混干夏混油", en: "Wint-dry / Sum-oily" },
+  ],
+  budget: [
+    { v: "15", label: "<$15" },
+    { v: "25", label: "$15–25" },
+    { v: "40", label: "$25–40" },
+    { v: "", label: "$40+" },
+  ],
+  finish: [
+    { v: "水光", en: "Dewy" },
+    { v: "自然", en: "Natural" },
+    { v: "哑光", en: "Matte" },
+  ],
+};
+const OPT_GROUP_LABEL = {
+  skin:   { zh: "肤质（可多选）",   en: "Skin (multi)" },
+  budget: { zh: "预算（单选）",     en: "Budget (single)" },
+  finish: { zh: "妆效（单选）",     en: "Finish (single)" },
+};
+const SKIN_MEM_MAP = { "痘痘肌": "痘肌" };   // 记忆存中文标签，面板 chip 值缩写
+
+function openingPanelHtml(profile){
+  const en = uiLang === "en";
+  const memSkins = (profile && profile.skins || []).map(s => SKIN_MEM_MAP[s] || s);
+  const chip = (o, k) => `<button class="chip opt-chip${k === "skin" && memSkins.includes(o.v) ? " sel" : ""}" data-k="${k}" data-v="${esc(o.v)}">${k === "budget" ? o.label : (en ? o.en : esc(o.v))}</button>`;
+  const group = (k) => `<div class="opt-group"><div class="opt-label">${OPT_GROUP_LABEL[k][en ? "en" : "zh"]}</div>
+    <div class="opt-opts">${OPEN_OPTIONS[k].map(o => chip(o, k)).join("")}</div></div>`;
+  return `<div class="opt-panel">
+    <div class="opt-head">👋 ${en ? "Tell me your preferences and I'll pick for you:" : "告诉我您的偏好，我直接帮您挑："}</div>
+    ${group("skin")}${group("budget")}${group("finish")}
+    <div class="opt-actions">
+      <button class="chip opt-go">${en ? "👌 Recommend for me" : "👌 按这个推荐"}</button>
+      <button class="chip opt-skip">${en ? "✍️ I'll type it" : "✍️ 我自己说"}</button>
+    </div>
+  </div>`;
+}
+
+/* 组装：皮肤短语 + 预算档上限 + 妆效短语 → 自然语言 query。
+   中文走 CJK 快路径（毫秒级）；英文走英文规则（冬/夏词触发 seasonal）。 */
+function composeOpeningQuery(sel){
+  const en = uiLang === "en";
+  const parts = [];
+  if (sel.skin.length) {
+    if (en) {
+      const map = { "混油": "combination and oily", "混干": "combination and dry",
+                    "痘肌": "acne-prone", "敏感肌": "sensitive",
+                    "冬混干夏混油": "dry in winter and oily in summer" };
+      parts.push("my skin is " + sel.skin.map(s => map[s] || s).join(", "));
+    } else {
+      parts.push("肤质是" + sel.skin.map(s => (s === "痘肌" ? "痘痘肌" : s)).join("、"));
+    }
+  }
+  if (sel.budget) parts.push(en ? ("budget under $" + sel.budget) : ("预算" + sel.budget + "美元以内"));
+  if (sel.finish) parts.push(en ? ("I want a " + ({ "水光":"dewy", "自然":"natural", "哑光":"matte" }[sel.finish] || sel.finish) + " finish") : ("想要" + sel.finish + "妆效"));
+  if (!parts.length) return "";
+  return parts.join(en ? ", " : "，") + (en ? ", recommend me a foundation." : "，帮我推荐合适的粉底液");
+}
+
+function wireOpeningPanel(row){
+  const panel = row.querySelector(".opt-panel");
+  if (!panel) return;
+  const chips = panel.querySelectorAll(".opt-chip");
+  chips.forEach(b => {
+    b.onclick = () => {
+      if (b.dataset.k === "skin") {
+        // 季节项与单肤质互斥：选冬混干夏混油清掉单肤质，反之亦然
+        if (b.dataset.v === "冬混干夏混油")
+          chips.forEach(x => { if (x.dataset.k === "skin" && x !== b) x.classList.remove("sel"); });
+        else
+          chips.forEach(x => { if (x.dataset.k === "skin" && x.dataset.v === "冬混干夏混油") x.classList.remove("sel"); });
+      } else {
+        chips.forEach(x => { if (x.dataset.k === b.dataset.k) x.classList.remove("sel"); });
+      }
+      b.classList.toggle("sel");
+    };
+  });
+  const sel = () => {
+    const s = { skin: [], budget: "", finish: "" };
+    chips.forEach(b => { if (b.classList.contains("sel")) { if (b.dataset.k === "skin") s.skin.push(b.dataset.v); else s[b.dataset.k] = b.dataset.v; } });
+    return s;
+  };
+  const goBtn = panel.querySelector(".opt-go");
+  goBtn.onclick = () => {
+    const q = composeOpeningQuery(sel());
+    if (!q) {
+      const hint = uiLang === "en" ? "Pick at least one ↑" : "先选一个再点我 ↑";
+      if (goBtn.textContent !== hint) { goBtn.textContent = hint; setTimeout(() => { goBtn.textContent = uiLang === "en" ? "👌 Recommend for me" : "👌 按这个推荐"; }, 1600); }
+      return;
+    }
+    // 2026-08-31 用户：选完后面板保留，不隐藏提问与选项——「AI 的第一个问题」不该消失
+    input.value = q;
+    send();
+  };
+  panel.querySelector(".opt-skip").onclick = () => {
+    const bubble = row.querySelector(".bubble");
+    panel.remove();
+    if (!bubble.querySelector(".opt-mem")) row.remove();   // 有记忆问候则保留，只收起面板
+    input.focus();
+  };
+}
+
+/* ---------- 跨会话记忆问候：隔很久重开 → 「还是以混油肤质为您推荐粉底液吗？」 ---------- */
+function showWelcome(profile){
+  const skins = (profile && profile.skins) || [];
+  const gap = profile ? (Date.now() - new Date(profile.last_visit || 0).getTime()) : 1e99;
+  let html = "";
+  if (skins.length && gap > MEMORY_GAP_MS) {
+    const s = skins.join("、");
+    html = `<div class="opt-mem">${uiLang === "en"
+      ? `👋 Long time no see! Last time you mentioned ${s} skin.<br>Still want me to recommend for ${s} skin?`
+      : `👋 好久不见！上次您提到是${s}肤质。<br>这次还是以${s}肤质为您推荐粉底液吗？`}</div>
+      <div class="softq" style="margin-top:8px;">
+        <button class="chip softq-btn" id="memYes">${uiLang==="en" ? "Yes, continue" : "是的，继续"}</button>
+        <button class="chip softq-btn" id="memNo">${uiLang==="en" ? "No, my skin changed" : "不是，我肤质变了"}</button>
+      </div>`;
+  }
+  html += openingPanelHtml(profile);
+  const row = addBubble("bot", html);
+  const yes = row.querySelector("#memYes"), no = row.querySelector("#memNo");
+  if (yes) yes.onclick = () => {
+    yes.disabled = no.disabled = true; yes.textContent = "✓";
+    addBubble("bot", uiLang === "en" ? "🙂 Great — I'll keep recommending for your skin." : "🙂 好，就按您记得的肤质推荐。");
+  };
+  if (no) no.onclick = async () => {
+    yes.disabled = no.disabled = true; no.textContent = "...";
+    try {
+      await fetch("/api/profile", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: USER_ID, update: { skins: [] } }) });
+      addBubble("bot", uiLang === "en" ? "🤔 Got it — what's your skin type now?" : "🤔 好的，那您现在的肤质是？");
+    } catch (e) { addBubble("bot", "⚠️ " + T("更新失败","Update failed")); }
+  };
+  wireOpeningPanel(row);
+}
+
+// 加载时拉用户画像：决定界面语言 + 记忆问候（无画像/失败 → 普通欢迎）
+fetch("/api/profile?user_id=" + encodeURIComponent(USER_ID)).then(r => r.json()).then(d => {
+  const p = d.profile;
+  if (p && p.lang) uiLang = p.lang === "zh" ? "zh" : "en";
+  $("#headTitle").textContent = T("AI 粉底导购", "AI Foundation Guide");
+  showWelcome(p);
+}).catch(() => { showWelcome(null); });
+input.focus();
+</script>
+</body>
+</html>
