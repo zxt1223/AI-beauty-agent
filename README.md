@@ -88,7 +88,7 @@ DEEPSEEK_API_KEY=sk-xxx
 不配置也能跑——LLM 超时/断连/无 key 一律自动降级回规则，整轮不崩。
 
 ### 3. 完整评测
-完整评测需要本地 MySQL（`beauty_agent` 库，表结构见 [docs/database_schema.md](docs/database_schema.md)）。数据装载脚本为环境相关的一次性脚本，不随仓库分发；仓库内附评测数据 CSV 快照（`data/eval_review_50.csv`、`data/candidate_pool_v2.csv` 等），可自行装载后运行：
+完整评测需要本地 MySQL（`beauty_agent` 库，表结构见 [docs/database_schema.md](docs/database_schema.md)）。数据装载脚本为环境相关的一次性脚本，不随仓库分发；仓库内附候选池 CSV 快照（`data/candidate_pool_v2.csv`，10702 行 / 200 题）与 v3 评测源（`data/_v3_eval_full.csv`，159 行）。**评测真值以 MySQL `eval_review_50`（200 行）为准**；注意 `data/eval_review_50.csv` 是 v1 遗留的 11 行样例，勿当快照——数据文件角色与行数核对见 [data/README.md](data/README.md)。运行：
 
 ```bash
 python scripts/eval_runner.py         # 锚点指标 + 坏例登记，输出 data/eval_report.csv

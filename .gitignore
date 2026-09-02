@@ -54,3 +54,10 @@ data/review_scores.csv
 data/candidate_pool.csv
 docs/eval_v2_batch4_draft.md
 docs/ec_commercial_narrative.md
+
+# ===== 报告产物 / 看板 / v3 中间产物（eval_*.py 一键可重跑或可删，不入库；生成方式见 data/README.md）=====
+data/*_report.csv
+data/dashboard.html
+data/_v3_*
+!data/_v3_eval_full.csv
+data/_tag_fill.json

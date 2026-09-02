@@ -2,7 +2,9 @@
 
 > **维护规则（强制）：** 任何对 `beauty_agent` 库的建表 / 改字段 / 改指标 / 改标签，**必须同步更新本文件**。本文件是数据库的"真相源"，DBeaver 里看到的任何结构都要能在这里找到解释。
 >
-> 最近更新：2026-08-29（badcase 优化：**q7 gold 重标**——primary EX1 Invisiwear（实际中度遮瑕/遮瑕未标）换 **B08SW7WZPX**（液体/全肤质;敏感肌/哑光/高遮瑕，不在缺陷证据表），extras 去掉缺陷商品 Dermacol（闷痘:4）/Clinique（色号偏深黄:3）换 **B00GCQZB00**（乳霜/全肤质/哑光/高遮瑕）；双表 UPDATE（备份 bak_v19）+ 重建池，首答 **17/19→18/19=94.7%**，NDCG 0.553/避雷 0.889/CONTRACT 105/105/3 决策指标全零回归，坏例 5→4。**Phase-1 池 q7/q9/q11 避雷泄漏经实测为池内子集伪影**——负例商品 Agent 全库排序 28/139/73 名、生产不推，缺陷预过滤清不掉（弱证据未过 70% 共识 + q7/q9 无避雷轴），用户拍板跳过暂不改）｜ 版本：v18
+> 最近更新：2026-09-02（**避雷共识补最小样本下限（P0-1 审计修复）**——`defect_consensus.py` 口径升级：缺陷轴提及数 ÷ 该商品负面评论总数 ≥70% 之外，加 **该商品负面评论总数 ≥5**（`config.DEFECT_MIN_NEG`）才参与判定，不足 5 条偶发差评不配下「避雷」结论（审计实证：原无下限时 195 缺陷证据商品 78 款被一票避雷、命中项负面评论中位仅 1）；分母口径注释写死 = 该商品「负面」评论总数（`n_neg_reviews`，非含好评全部评论）；旧口径归档为 `legacy_consensus_axes()` 供消融。**只影响 agent 运行时动态 map（78→5 款）与未来重建池，现役静态评测池不动** → 锚点零漂移：首答 94.7%/CONTRACT 105/105/全库避雷 24/24/追问 29.2%，v3 四维 26.7%/0.268/16-16/资损 38/39 逐数字复现）｜ 版本：v19
+>
+> 2026-08-29（badcase 优化：**q7 gold 重标**——primary EX1 Invisiwear（实际中度遮瑕/遮瑕未标）换 **B08SW7WZPX**（液体/全肤质;敏感肌/哑光/高遮瑕，不在缺陷证据表），extras 去掉缺陷商品 Dermacol（闷痘:4）/Clinique（色号偏深黄:3）换 **B00GCQZB00**（乳霜/全肤质/哑光/高遮瑕）；双表 UPDATE（备份 bak_v19）+ 重建池，首答 **17/19→18/19=94.7%**，NDCG 0.553/避雷 0.889/CONTRACT 105/105/3 决策指标全零回归，坏例 5→4。**Phase-1 池 q7/q9/q11 避雷泄漏经实测为池内子集伪影**——负例商品 Agent 全库排序 28/139/73 名、生产不推，缺陷预过滤清不掉（弱证据未过 70% 共识 + q7/q9 无避雷轴），用户拍板跳过暂不改）｜ 版本：v18
 
 **v12**（shade_tag 色号标签提取（64.9% 覆盖）——为色号 query 建地基；**避雷集升级 v2**：negative 从 v11「缺陷证据反推」升级为「**意图相反标签匹配**」，避雷商品必须能从可见标签自证（要高遮瑕→避轻遮瑕、要白皙→避深色、要控油→避水光/光泽），缺陷证据降级为无相反标签轴的兜底；修复 fair share 习语误判）
 
@@ -25,10 +27,10 @@
 | `tag_distribution` | 27 | 分类标签体系分布（+5 个色号桶） | 无 |
 | `eval_queries` | 11 | 评测集 Query 主表（仅 need 搜索需求句；v13 加显式/隐藏意图 + 改写 4 字段） | `id` 主键 |
 | `eval_gold` | 67 | 金标准明细（Query→商品一对多；8 primary + **32 extra**（27 四维 + 5 隐式）+ 27 negative） | `query_id`→`eval_queries.id`，`asin`→`products.parent_asin` |
-| `eval_review_50` | 41 | 人工一致性复核表（评测集 v2：24 条锚点题 + **9 条隐式意图题 ids 25-33**（2026-08-28 二期实验新增）+ **8 类各补 1 条 ids 34-41**（2026-08-29 第四批补题冲量）） | `id` 自增行号（无外键） |
-| `对比表1` | 41 | eval_review_50 的副本，人工复核对照用（同步重建） | 同 eval_review_50 |
+| `eval_review_50` | 200 | 人工一致性复核表 / **评测集真相源**（**41 条 v2** = 24 锚点 + 9 隐式意图 ids 25-33（2026-08-28 二期）+ 8 类补题 ids 34-41（2026-08-29）；**+159 条 v3 三轨 ids 42-200**（2026-09-02，好评 88/模拟 32/差评 39，见 agent_design §8.17）） | `id` 自增行号（无外键） |
+| `对比表1` | 41 | eval_review_50 的 **v2 复核副本**，人工复核对照用（同步重建；**v3 的 42-200 未进本表**，v3 评测源在 `data/_v3_eval_full.csv`） | 同 eval_review_50 |
 | `candidate_pool` | 617 | **候选池（Phase 0 收尾，对标 C4）**：每 Query 金标准全量 + 50 负候选（难例15/随机35），NDCG 在池内计算避免全库排序虚高 | `query_id` 对应 eval_queries 行号，`asin`→`products.parent_asin` |
-| `candidate_pool_v2` | 2249 | **v2 候选池（2026-08-29 重建）**：41 题（24 锚点 + 9 隐式意图 + 8 补题）× 候选池（锚点题池逐行恢复原始保证首答复现；新增题难例/随机分层；**q7 重标后 2250→2249**：q7 gold 6→5 asin）。与 candidate_pool 同方法学，轴从 Agent `extract_constraints` 推导 | `query_id` 对应 eval_review_50.id，`asin`→`products.parent_asin` |
+| `candidate_pool_v2` | 10702 | **v2 候选池（2026-08-29 建，2026-09-02 v3 扩池重建至 200 题）**：池内首答/NDCG 口径池（200 题 × 平均 ~54 候选/题；行数随题集演进——历史口径 2249/41 题已过时，见 [data/README.md](../data/README.md)）。与 candidate_pool 同方法学，轴从 Agent `extract_constraints` 推导 | `query_id` 对应 eval_review_50.id（1-200），`asin`→`products.parent_asin` |
 
 ```mermaid
 erDiagram
@@ -289,7 +291,7 @@ erDiagram
 | `pool_type` | TEXT | `gold` / `hard` / `random` |
 | `matched_axes` | TEXT | 难例命中的标签轴 |
 
-**数据**：41 题 × 2249 行（2026-08-29 第四批重建；q7 重标后 2250→2249）。锚点题（query_id≤24）池逐行恢复原始行，保证首答复现；新增 25-33（盲区题无显式轴 → 难例多为 0，以随机为主）+ 34-41（8 类各补 1 条，含难例 15）。**q7 重标（bak_v19）实测零 RNG 漂移**：q1-6 / q8-24 / q25-41 池内行全列一致，仅 q7 自身 gold 行更换（详见 §7.7）。
+**数据（2026-09-02 v3 扩池重建后）**：**200 题 × 10702 行**（历史：2026-08-29 第四批重建时 41 题 × 2249 行，q7 重标后 2250→2249——早期文档若写 2249/41 题即该口径，已过时）。锚点题（query_id≤24）池逐行恢复原始行，保证首答复现；v2 新增 25-33（盲区题无显式轴 → 难例多为 0，以随机为主）+ 34-41（8 类各补 1 条，含难例 15）；**v3 新增 42-200 随三轨评测题重建**。**q7 重标（bak_v19）实测零 RNG 漂移**：q1-6 / q8-24 / q25-41 池内行全列一致，仅 q7 自身 gold 行更换（详见 §7.7）。
 
 **评测口径（2026-08-28 定标，2026-08-29 q20 修复后更新，首答命中率，只算 ids 1-24 锚点题）**：
 - **分母** = 有推荐的 v2 题（`decide_ask` 决策 ∈ {no_ask, ask_shade_soft}，排除 ask_all/ask_first 追问题）= **19 条**
@@ -431,6 +433,10 @@ SELECT * FROM tag_distribution WHERE tag_type = 'skin_tag';
 | **权重组合排序重构（2026-08-31）**：硬约束（预算/敏感/避雷/死链/显式妆效/遮瑕/质地）+ 软约束（肤质兼容）→ `_retrieve` 精确候选 <3 时 fill-in 补款（只放松质地→遮瑕，绝不放松妆效，安全硬约束全跳不过），推荐 dict 新增 `fill_in` 字段（如「质地(液体→棒状)」）→ `_build_reply` 自然话术；`retrieval_engine.tag_score` 肤质轴软权重（命中+2/全肤质+1/混干混油兼容中性混合肌+1） | 无新文件（agent.py `_retrieve`/`_pick_recs`/`_build_reply` + retrieval_engine.py `tag_score`） | `scripts/agent.py` + `scripts/retrieval_engine.py` |
 | **开场选项面板（2026-08-31，零后端改动）**：开头问候改三组 chips——肤质多选（混油/混干/痘肌/敏感肌/冬混干夏混油=季节互斥）、预算单选（库价分位四段 `<$15/$15–25/$25–40/$40+`，组装取档位上限「预算40美元以内」，`$40+` 不传数字）、妆效单选（水光/自然/哑光）；`👌 按这个推荐` 组装成自然语言 query 走既有规则层，`✍️ 我自己说` 收起；记忆肤质自动预选、双语 | 无新文件 | `web/index.html`（`OPEN_OPTIONS`/`openingPanelHtml`/`composeOpeningQuery`/`wireOpeningPanel`） |
 | **资损陷阱题（2026-08-31）**：8 题 3 类资损断言（A 报价溯源=假价不得确认/回显；B 优惠溯源=不得虚构促销；C 预算硬约束=每条推荐价 ≤ 上限×1.3）。**架构级保证**：LLM 只填约束、回复确定性从库生成→报价/优惠结构上不可能虚构。纯规则零 LLM 跑批**拒绝率 8/8=100%**（新文件不碰 eval 锚点） | `data/loss_risk_report.csv` | `scripts/loss_risk_cases.py`（陷阱题集，合成 query）+ `scripts/eval_loss_risk.py`（runner，全过 exit 0 CI 可挂） |
+| **企业级检索链路骨架（Phase-MVP，2026-09-01）**：多路召回（字段/文本/热销/语义并集）→ 路由分流（D 通道口径：结构化约束含隐式意图→tagfirst / 无约束→语义）→ 精排接口（冷启动 tagfirst，行为模型双塔预留位）→ 后置避雷/预算硬过滤。agent `_record` 新增 `route` 字段（channel + field/text/hot/vector/union 计数）→ 随埋点可观测。**config.py 收拢可调参数单一真相源**（热销分档/避雷阈值/会话预算/画像上限/语义权重/召回 top-K/精排器选择） | `data/harness_trace.jsonl`（route_trace 随 record 追加，无 key） | `scripts/recall_router.py`（新）+ `scripts/ranker.py`（新）+ `scripts/config.py`（新）+ `scripts/agent.py`（`_retrieve` 接线） |
+| **数据看板（2026-09-01）**：dashboard.py 读 `harness_trace.jsonl` 全链路埋点 → 聚合 → 自包含静态页（检索耗时分布 / 路由通道分布 / 追问·兜底·降级率 / 意图·语言 / 预算护栏 / 热推 Top-10；gate_rejected/run_error 事件行单计） | `data/dashboard.html`（生成产物，静态） | `scripts/dashboard.py`（新，零依赖只读） |
+| **存储接口抽象（2026-09-01）**：KVBackend 接口（get_all/save_all）→ JsonKVBackend（现行，JSON 文件）→ RedisKVBackend（预留位，部署传 redis 客户端即切换）；ProfileStore 承接画像 get/touch + LRU 淘汰，web_server 只做薄委托（锁语义不变：锁在 web 层，store 内不加锁） | `data/user_profiles.json`（JsonKVBackend 后端，格式不变） | `scripts/store.py`（新）+ `scripts/web_server.py`（画像四函数改薄委托） |
+| **行为精排演进位（2026-09-01）**：BehaviorRanker（LambdaRank 双塔：曝光/点击/转化/CTR/加购率/GMV/价格带拟合/复购/差评规避后转化）从冷启动 → 行为模型的完整路线图（埋点漏斗→训练→shadow→重训闭环），数据补齐即 `config.RANKER="behavior"` 一行切换 | —（纯文档） | `docs/enterprise_evolution.md`（新） |
 | 双击启动 AI 导购（CRLF + python 回退链：PATH python 带 pandas → tradingagents → Anaconda base） | — | `启动AI导购.bat`（2026-08-29，UTF-8 no BOM + chcp 65001；`python` 裸名在 cmd 会命中 WindowsApps 0 字节 stub，回退链绕过） |
 
 **重建链路（v13）：** `clean_products.py`（排 bundle/妆前乳）→ `extract_queries.py`（query_type 分层 + intent 多轴）→ `shade_tag_extract.py`（v12：色号标签）→ **`coverage_extract.py`（2026-08-27：遮瑕标签自动提取 + coverage_tag_source）** → `build_eval_set.py`（仅 need 生成金标准 + extras 四维匹配）→ `build_avoid_set.py`（v12：意图相反避雷）→ **`intent_reasoning.py`（v13：隐藏意图推理 + query 改写）→ `enhance_extras_implicit.py`（v13：隐式金标准增补，独立列）** → `load_mysql.py` + `load_eval_mysql.py`（extra 读两列）→ `augment_eval_set.py`（补 complexity/difficulty + 生成复核表）→ `sync_avoid_review.py`（v13：展示列含【隐式】+ 重置 extras_ok）→ `build_candidate_pool.py`（Phase 0：候选池采样，NDCG 评测范围改为候选池内）
