@@ -33,13 +33,24 @@ ROOT = Path(r"C:\Users\Lenovo\Desktop\beauty-agent")
 from retrieval_engine import ProductIndex
 from intent_reasoning import infer_implicit, rewrite_query
 from defect_consensus import consensus_axes
-
-# 热度分档（2026-08-27 用户定）：高 ≥200 / 中 50-199 / 低 <50
-HEAT_HI, HEAT_MID = 200, 50
+from recall_router import RecallRouter
+from ranker import get_ranker
+from config import (HEAT_HI, HEAT_MID, SEM_WEIGHTS,
+                    SEM_PROBE_THRESHOLD, SEM_PROBE_COARSE_K)
 
 # 中文判定（前端双语支持）：extract_constraints 只认英文关键词，含中文 → 规则必然盲区，
 # _llm_merge 补全显式约束（见 _merge_cjk_constraints）。eval 集 ids 1-41 全英文，零影响。
 CJK = re.compile(r"[一-鿿]")
+
+# 库外硬约束强声明（2026-09-02 用户拍板选项2）：only buy / hard requirement / must have /
+# no X at any stage / zero X 等排他性硬声明 → 用户要的是可验证的硬保证（cruelty-free/纯素/
+# 无动物成分等 catalog 标签空间外的属性），语义推荐无法硬保证 → 保持追问比放行诚实。
+# q157 实证：conf=0.060 略过 θ，放行推荐混入池内 17-query negative 商品。语义试探入口拦截。
+_HARD_DECLARE = re.compile(
+    r"(only\s+buy|hard\s+requirement|must\s+have|at\s+any\s+stage|"
+    r"no\s+animal|zero\s+(animal|derived)|strictly|absolutely\s+(no|must)|"
+    r"refuse\s+to)",
+    re.IGNORECASE)
 
 # 缺陷证据轴 → 中文话术（product_defect_evidence.csv 的 defect_axes 词汇）
 DEFECT_LABEL = {"卡粉": "卡粉/脱妆", "脱妆": "卡粉/脱妆", "刺激": "刺激/致敏",
@@ -92,6 +103,8 @@ class GuideAgent:
     def __init__(self, idx=None, intent_mode="rule", reply_lang="zh"):
         self.idx = idx or ProductIndex()
         self.defect = self._load_defect()
+        self.recall_router = RecallRouter(self.idx)   # 多路召回 + 路由（Phase-MVP）
+        self.ranker = get_ranker(self.idx)            # 精排器接口（config.RANKER，当前冷启动 tagfirst）
         self.intent_mode = intent_mode
         self.reply_lang = reply_lang
         self._llm = None
@@ -615,12 +628,90 @@ class GuideAgent:
     # ------------------------------------------------------------------
     # 检索 + 决策节点「改写重试」+ 决策节点「诚实兜底」
     # ------------------------------------------------------------------
+    def _semantic_probe(self, req, meta):
+        """语义试探（2026-09-02 用户拍板 §8.18）：decide_ask 判 ask_all/ask_first 时的二次闸门。
+
+        仅对无结构化约束 query（recall_router.channel=="semantic"）执行——reranker 全程隔离
+        tagfirst，绝不碰结构化主链路。流程：mixed 粗排全库 top-20 → bge-reranker 精排 →
+        top-1 置信度 ≥ SEM_PROBE_THRESHOLD(0.05) 判「有明确语义指向」→ 走语义推荐；
+        < θ 判「真模糊」→ 保持 ask_all/ask_first 追问（锚点 q4/q5/q6 conf 0.001-0.008 实证）。
+
+        返回 dict：{passed, top1_conf, reranked} 或 None（非语义通道，不试探）。
+        reranked = [(asin, conf_score, reasons), ...] 精排降序，供 _retrieve 复用完整后置硬过滤。
+        """
+        # 入口条件 = 结构化约束全空（真正没有可检索标签）——不看 route_query 字符串。
+        # 理由（2026-09-02 实测实证）：q64 humid stay put route=avoid、q88 affordable route=budget、
+        # q74 true beige route=shade 是「route 语义归类有、但 extract_constraints 标签抽取全空」的
+        # 词表外语义题，decide_ask 判 ask_all，恰恰是语义试探要救的对象；若按 RecallRouter.channel
+        # （含 route 判定）会把这些题误归 tagfirst 挡在试探外（q43/q64/q88/q115 门禁点名验证失败）。
+        # 有真实结构化约束（hard/soft/finish/coverage/form/budget/implicit 任一非空）→ 绝不进试探，
+        # reranker 全程隔离 tagfirst 主链路。
+        if (req.get("hard") or req.get("soft") or req.get("finish")
+                or req.get("coverage") or req.get("form")
+                or (req.get("budget") is not None) or req.get("implicit")):
+            return None
+        # 库外硬约束强声明 → 语义推荐无法硬保证（无法验证 cruelty-free/纯素/无动物成分等
+        # catalog 标签空间外的属性）→ 保持 ask_all 追问，比放行诚实（2026-09-02 用户拍板）。
+        # 能走到这里已保证标签全空，此时强声明词出现的诉求必在库外 → 拦截不试探。
+        if _HARD_DECLARE.search(req.get("qtext") or ""):
+            meta["_sem_block"] = "hard_declare"
+            return None
+        # mixed 排序需要向量分（bm25+向量各半）。_retrieve 已去无条件 enable_vectors 省性能，
+        # 语义试探是唯一需要向量的兜底路径 → 在此显式启用（幂等：已加载直接返回）。
+        self.idx.enable_vectors()
+        # 惰性加载 reranker（与 eval_dual_channel.RerankerChannel 同路径，缺模型自动降级不崩）
+        if getattr(self, "_reranker_model", None) is None:
+            try:
+                from sentence_transformers import CrossEncoder
+                local = ROOT / "models" / "bge-reranker-base"
+                path = str(local) if (local / "model.safetensors").exists() else "BAAI/bge-reranker-base"
+                self._reranker_model = CrossEncoder(path)
+                print(f"Reranker 就绪: {path}")
+            except Exception as e:
+                print(f"语义试探跳过（reranker 不可用: {e}）")
+                self._reranker_model = False
+        if self._reranker_model is False:
+            return None
+
+        cands = list(self.idx.by_asin)
+        coarse = self.idx.score_candidates("mixed", req, cands, SEM_WEIGHTS)[:SEM_PROBE_COARSE_K]
+        if not coarse:
+            return None
+        def _doc(p):
+            def en(v):
+                s = str(v).strip()
+                return s if s and s.lower() not in ("nan", "missing") else ""
+            return " ".join(x for x in [p["title"], p["brand"], en(p.get("finish_type")),
+                                        en(p.get("coverage")), en(p.get("item_form")),
+                                        en(p.get("skin_type"))] if x)
+        pairs = [(req["qtext"], _doc(self.idx.by_asin[a])) for a, _s, _r in coarse]
+        scores = self._reranker_model.predict(pairs)
+        if hasattr(scores, "tolist"):
+            scores = scores.tolist()
+        scored = sorted(zip(coarse, scores), key=lambda x: -float(x[1]))
+        top1_conf = float(scored[0][1])
+        reranked = [(a, float(s), r) for (a, _s, r), s in scored]
+        passed = top1_conf >= SEM_PROBE_THRESHOLD
+        return {"passed": passed, "top1_conf": top1_conf, "reranked": reranked}
+
     def _retrieve(self, req, meta, n=12):
-        """全库 tagfirst 排序（真实场景，非候选池）→ 后置硬过滤（质地/遮瑕/预算/缺陷证据）。
+        """多路召回 → 路由 → 排序（真实场景，非候选池）→ 后置硬过滤（质地/遮瑕/预算/缺陷证据）。
+        Phase-MVP（2026-09-01）：检索走 RecallRouter——有结构化约束（含隐式意图）路由到
+        tagfirst（字段路=硬约束通过全集，与旧全库 tagfirst 字节级一致，锚点零漂移）；
+        无约束路由到语义通道（BM25+向量，向量未加载自动降级）。route_trace 落 meta["route"]
+        → _record → harness_trace.jsonl（可观测：各路由了多少、走哪个通道）。
         2026-08-29：去掉无条件 enable_vectors()——tagfirst 排序不用向量，rule/hybrid 路径
         都不依赖 bge；需向量的模式（vec/mixed）由 eval 脚本显式 enable，vec_sim 自持惰性加载。
         省掉 rule/hybrid 每次进程一次性 ~16s 模型载入 + 几百 MB 内存（diag_system_layer.py 实测）。"""
-        scored = self.idx.score_candidates("tagfirst", req, list(self.idx.by_asin))
+        ch, cands, rr = self.recall_router.route_and_recall(req)
+        meta["route"] = {**rr, "cands": len(cands)}   # 含 channel/field/text/hot/vector/union
+        if meta.get("_sem_reranked"):
+            # 语义试探已产出 reranker 精排结果 → 直接复用（走后置硬过滤，不重复检索排序）
+            scored = meta.pop("_sem_reranked")
+        elif ch == "semantic":   # 无结构化约束 → 语义通道（D 通道口径，锚点题全走 tagfirst）
+            scored = self.idx.score_candidates("mixed", req, cands, SEM_WEIGHTS)
+        else:
+            scored = self.ranker.rank(cands, req, meta)   # 精排接口：换精排只改 config.RANKER
 
         # 中文路径推荐质量护栏（2026-08-31 用户实测）：显式妆效已由下方硬过滤保证只推该妆效款，
         # 这里再兜一层口碑——不把低口碑商品推第一。只在 meta["cjk"]（中文 query）生效 → 英文锚点零漂移。
@@ -1049,12 +1140,26 @@ class GuideAgent:
         # ① 追问决策
         ask = self.decide_ask(req, meta)
 
-        # 追问时先不推荐（等用户回答），直接进决策记录
+        # 追问时先不推荐（等用户回答），直接进决策记录。
+        # 2026-09-02 语义试探闸门（§8.18）：decide_ask 判 ask_all/ask_first 后先做一轮低成本
+        # 语义试探——reranker top-1 置信度 ≥ θ 说明 query 有明确语义指向（词表外但语义可挖），
+        # 走语义推荐；< θ 才是真模糊（锚点 q4/q5/q6）→ 保持追问。
         if ask["decision"] in ("ask_all", "ask_first"):
-            return self._record(query, qid, query_type, req, meta, ask,
-                                {"triggered": False, "rewrite": ""},
-                                {"triggered": False, "level": "", "message": "", "alternatives": []},
-                                [], [], llm_info, memory_applied)
+            probe = self._semantic_probe(req, meta)
+            meta["semantic_probe"] = ({"entered": False, "passed": False, "top1_conf": None,
+                                       "block": meta.get("_sem_block")}
+                                      if probe is None else
+                                      {"entered": True, "passed": probe["passed"],
+                                       "top1_conf": probe["top1_conf"]})
+            if probe is not None and probe["passed"]:
+                # 语义试探通过 → 有语义指向 → 走语义推荐（不再追问）
+                meta["_sem_reranked"] = probe["reranked"]     # _retrieve 语义分支直接复用
+                ask = {"decision": "no_ask", "questions": []} # 语义推荐不追问
+            else:
+                return self._record(query, qid, query_type, req, meta, ask,
+                                    {"triggered": False, "rewrite": ""},
+                                    {"triggered": False, "level": "", "message": "", "alternatives": []},
+                                    [], [], llm_info, memory_applied)
 
         # ② 检索（全库）
         viable, excluded = self._retrieve(req, meta)
@@ -1115,6 +1220,7 @@ class GuideAgent:
             "query": query,
             "intent_source": intent_source,
             "llm_evidence": llm_info.get("evidence") or llm_info.get("degraded") or "",
+            "route": meta.get("route"),   # 多路召回路由决策（Phase-MVP，落 harness_trace.jsonl）
             "constraints": {
                 "hard": sorted(req["hard"]), "soft": sorted(req["soft"]),
                 "finish": req["finish"], "coverage": req["coverage"],
@@ -1135,10 +1241,12 @@ class GuideAgent:
             "soft_question": soft_question,
             "skins_stated": sorted(meta["skins_stated"]),   # 本轮用户明确说过的肤质 → 记忆候选
             "memory": {"applied": bool(memory_applied), "skins": memory_applied},
+            "semantic_probe": meta.get("semantic_probe"),   # 语义试探埋点（§8.18）：entered/passed/top1_conf
             "reply": self._build_reply(record_view={
                 "ask": ask, "retry": retry, "fallback": fallback,
                 "recommendations": recommendations, "avoided": avoided,
                 "soft_question": soft_question,
+                "semantic_probe": meta.get("semantic_probe"),
                 "constraints": {k: v for k, v in {
                     "hard": sorted(req["hard"]), "soft": sorted(req["soft"]),
                     "finish": req["finish"], "coverage": req["coverage"],
@@ -1175,6 +1283,15 @@ class GuideAgent:
                 "目前没有完全符合您需求的产品。您可以补充肤质/妆效/预算信息，我帮您再筛一次。",
                 "No perfect match right now — tell me your skin type, finish, "
                 "or budget and I'll re-filter.")
+
+        # 语义试探推荐提示（2026-09-02 §8.18）：词表外语义意图走语义试探产出 → 先加提示，
+        # 让用户知道「这是语义理解得到的推荐，可进一步补充偏好精准筛选」（不暴露标签缺失细节）
+        sp = record_view.get("semantic_probe")
+        if sp and sp.get("passed"):
+            lines.append(self._t(
+                "未识别到明确的肤质/妆效标签，以下为语义理解得到的推荐，告诉我您的偏好可以进一步精准筛选。",
+                "No explicit skin-type or finish labels detected — here are recommendations from "
+                "understanding your request. Tell me your preferences and I can narrow it down."))
 
         # 人性化导语 + 每款 2 行（一句话简介 + 💬📈💰），短、暖、直给
         n = len(recs)

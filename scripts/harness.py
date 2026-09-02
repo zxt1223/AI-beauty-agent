@@ -52,10 +52,8 @@ if not getattr(sys, "_beauty_stdout_utf8", False):
 ROOT = Path(__file__).resolve().parent.parent
 TRACE_PATH = ROOT / "data" / "harness_trace.jsonl"
 
-# ---- 会话预算（③）：单会话上限，超限降级而非拒绝 ----
-SESSION_MAX_QUERIES = 100      # 单会话最多查询次数（防死循环/刷接口）
-SESSION_MAX_LLM = 20           # 单会话最多 LLM 触发次数（成本控制；中文每条 LLM ~2-12s）
-SESSION_WINDOW_SEC = 3600      # 预算窗口：1 小时滚动
+# ---- 会话预算（③）：单会话上限，超限降级而非拒绝（阈值单一真相源在 config.py）----
+from config import SESSION_MAX_QUERIES, SESSION_MAX_LLM, SESSION_WINDOW_SEC
 
 # ---- 医疗越界关键词（④）：护肤品 ≠ 医疗建议 ----
 # 只收「治疗/用药」语义，不误伤日常选品——痘痘肌/敏感肌/遮痘印（遮盖）都是正常选品词，
@@ -364,6 +362,7 @@ class Harness:
             "fallback": (rec.get("fallback") or {}).get("level"),
             "n_scanned": n_total, "n_recs": n_recs,
             "dead_rerun": dead_rerun,
+            "route": rec.get("route"),   # 多路召回路由决策（Phase-MVP：channel + 各路召回数）
             "medical": bool(medical), "memory_applied": bool((rec.get("memory") or {}).get("applied")),
             "elapsed_ms": int((time.time() - t0) * 1000),
             "recommended_asins": [r.get("asin") for r in (rec.get("recommendations") or [])],

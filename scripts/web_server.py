@@ -41,7 +41,9 @@ HOST = "127.0.0.1"
 PORT = 7860
 FEEDBACK = ROOT / "data" / "ui_feedback.jsonl"  # 用户反馈落盘（运行时零依赖，不写 MySQL）
 PROFILE = ROOT / "data" / "user_profiles.json"  # 跨会话用户画像（匿名 userId 键控）
-MAX_PROFILES = 100                              # 画像上限，超出按 last_visit 淘汰最久
+# 存储接口抽象（store.py）：业务代码只依赖 KVBackend 接口，换存储（JSON→Redis）不换业务代码。
+from store import ProfileStore, JsonKVBackend    # noqa: E402
+_profile_store = ProfileStore(JsonKVBackend(PROFILE))  # 画像后端；锁在 web 层持有
 
 # 多语种分层路由（方案1）：英文→规则 / 中文→hybrid / 其他语种→LLM 翻译成英文→规则。
 # 前端不感知模式，用户只管说需求。lang_router.route 返回 (mode, query, lang, translated)。
@@ -63,44 +65,25 @@ _harness = Harness()                            # 驾驭层单例（会话预算
 #   匿名 + 无 key/无敏感数据 → 用户画像数据层 + 匿名隐私。
 # ---------------------------------------------------------------------------
 def _load_profiles():
-    if PROFILE.exists():
-        try:
-            return json.loads(PROFILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+    """整表读取（薄委托 ProfileStore.all）。调用方须持 _lock。"""
+    return _profile_store.all()
 
 
 def _save_profiles(profiles):
-    try:
-        PROFILE.parent.mkdir(parents=True, exist_ok=True)
-        PROFILE.write_text(json.dumps(profiles, ensure_ascii=False, indent=1),
-                           encoding="utf-8")
-    except Exception:
-        pass
+    """整表覆盖落盘（薄委托）。调用方须持 _lock。"""
+    _profile_store.save_all(profiles)
 
 
 def _get_profile(uid):
     if not uid:
         return None
-    return _load_profiles().get(uid)
+    return _profile_store.get(uid)
 
 
 def _touch(uid, **updates):
-    """加载 → 建/改 → 淘汰超限 → 落盘，返回该用户最新画像。调用方须持 _lock。"""
-    profiles = _load_profiles()
-    p = profiles.get(uid)
-    if p is None:
-        p = {"lang": None, "skins": [],
-             "created": time.strftime("%Y-%m-%d %H:%M:%S")}
-        profiles[uid] = p
-    for k, v in updates.items():
-        p[k] = v
-    if len(profiles) > MAX_PROFILES:
-        for old in sorted(profiles, key=lambda u: profiles[u].get("last_visit") or "")[:-MAX_PROFILES]:
-            profiles.pop(old, None)
-    _save_profiles(profiles)
-    return p
+    """加载 → 建/改 → 淘汰超限 → 落盘，返回该用户最新画像。调用方须持 _lock。
+    逻辑在 store.ProfileStore.touch（含 MAX_PROFILES 淘汰），此处只做薄委托。"""
+    return _profile_store.touch(uid, **updates)
 
 
 def _same_lang(plang, qlang):

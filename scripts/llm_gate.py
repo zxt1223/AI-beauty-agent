@@ -66,6 +66,24 @@ _SHADE_ASK = re.compile(r"哪款|哪一款|哪几款|有没有|有.*吗|which|do
 _COMPARE = re.compile(
     r"区别|差别|有什么不同|不同在哪|哪里不同|对比|比较|相比|"
     r"compare|difference|different|differ|which.*better|how.*(compare|differ)", re.I)
+# ---- 对已推荐商品的属性/风险追问（2026-09-01 用户实测 badcase）----
+# 用户推荐后问「这三款会不会卡粉 / 这款适合干皮吗 / 容不容易脱妆」= 在问刚推的那几款商品，
+# 必须绑定商品真实数据（标签 + 评论区差评主题）答，而不是泛化成通用护肤知识。
+# 规则：有商品指代(这款/这几款/上面…) + 风险或适配词；或「会不会/容易」+ 风险词。
+# 放在 _HELP 之前：复合问句「怎么选择色号呢？这三款会不会卡粉？」真实重点是商品，不能被
+# help（"怎么选"）抢走 → 否则 LLM 不知道「这三款」是哪三款 → 反问「你手边哪几款」+「什么肤质」。
+_QA_PROD_REF = re.compile(
+    r"这三款|这款|那款|这几款|那几款|上面|刚才|它们|这几个|那两个|这两款|"
+    r"这几|刚推荐|推荐的那|它|这些", re.I)
+_QA_VERB = re.compile(r"会不会|会不|容易|是否|易", re.I)
+_QA_RISK = re.compile(
+    r"卡粉|浮粉|闷痘|脱妆|拔干|搓泥|过敏|刺激|斑驳|假面|暗沉|起皮|厚重|太干|太油|闷|"
+    r"cake|cak|patchy|pill|breakout|break out|allerg|irritat|oxid|fall off|flaky", re.I)
+_QA_SUIT = re.compile(
+    r"适合|能用|可用|适配|友好|行吗|油皮|干皮|混油|混干|敏感|痘肌|"
+    r"suit|fit|work for|good for|oily|dry|sensitive", re.I)
+# 中文检测（补 CJK 规则层抽取用；agent.extract_constraints 是英文规则，不认中文）
+_CJK = re.compile(r"[一-鿿]")
 _AMBI_QUESTION = re.compile(
     r"为什么|为啥|怎么回事|怎么样|怎么知道|值得买|好不好|划算吗|能行吗|靠谱吗|"
     r"how come|why|is it good|worth it|this one|good buy", re.I)
@@ -187,11 +205,12 @@ def _parse_json(text):
 # ---------------------------------------------------------------------------
 _CLASSIFY_SYSTEM = (
     "你是美妆导购助手的「对话意图分类器」。判断用户这轮在说什么，只输出一个 JSON：\n"
-    '{"intent": "recommend|compare|shade_question|help|chat|shade_diagnosis|other", '
+    '{"intent": "recommend|compare|product_qa|shade_question|help|chat|shade_diagnosis|other", '
     '"confidence": 0-100整数, "reason": "一句话说明判断依据"}\n'
     "intent 含义：\n"
     "- recommend：用户在调整需求/继续要推荐（说肤质/妆效/预算/色号/换一款/再推荐等）\n"
     "- compare：要对比几款商品（区别/哪款更好）\n"
+    "- product_qa：在问刚才推荐的那几款商品的具体情况（会不会卡粉/适不适合我/容不容易脱妆）\n"
     "- shade_question：在问某款有没有他的色号（哪款有我这个色号/有黄二白吗）\n"
     "- help：求助/不会选/不知道怎么判断（不知道色号怎么办/怎么选）\n"
     "- shade_diagnosis：用户在回答 AI 上一条问的色号自测问题（说了血管颜色/冷暖调/金饰银饰/"
@@ -221,6 +240,12 @@ def _classify(context, turn_text, titles, reply_lang="zh", dialogue=None, last_a
     t = turn_text.strip()
     if _CHAT.match(t):
         return {"intent": "chat", "confidence": 95.0, "reason": "rule:chat"}
+    # 对已推荐商品的追问（先于求助）：有上轮推荐 且（商品指代+风险/适配 或 会不会+风险）→ 商品追问。
+    # 修复 2026-09-01 用户 badcase：「这三款会不会卡粉」被 help("怎么选") 抢走 → LLM 不知是哪三款
+    # → 反问「你手边哪几款/什么肤质」，卡粉也答成通用知识。此规则让商品追问先接住、绑定商品数据答。
+    if titles and ((_QA_PROD_REF.search(t) and (_QA_RISK.search(t) or _QA_SUIT.search(t)))
+                   or (_QA_VERB.search(t) and _QA_RISK.search(t))):
+        return {"intent": "product_qa", "confidence": 92.0, "reason": "rule:product_qa"}
     if _HELP.search(t):
         return {"intent": "help", "confidence": 93.0, "reason": "rule:help"}
     # 观察信号兜底（上一条 AI 诊断提问时 route() 已在会话层接住；这里是跨会话安全网）
@@ -247,7 +272,7 @@ def _llm_classify(context, turn_text, titles, reply_lang, dialogue=None, last_ai
             f"请判断本轮意图。")
     out = _chat(_CLASSIFY_SYSTEM, user, max_tokens=CLASSIFY_TOKENS, temperature=0)
     parsed = _parse_json(out)
-    if parsed and parsed.get("intent") in ("recommend", "compare", "shade_question",
+    if parsed and parsed.get("intent") in ("recommend", "compare", "product_qa", "shade_question",
                                            "help", "chat", "shade_diagnosis", "other"):
         conf = _num(parsed.get("confidence"), 75.0)
         return {"intent": parsed["intent"], "confidence": max(0.0, min(100.0, conf)),
@@ -262,7 +287,7 @@ def _llm_classify(context, turn_text, titles, reply_lang, dialogue=None, last_ai
 def _req_meta(agent, context):
     """对原始需求跑规则约束抽取，得到用户已说过的需求（供关联场景）。"""
     try:
-        return agent.extract_constraints(context)
+        req, meta = agent.extract_constraints(context)
     except Exception:
         req = {"hard": set(), "soft": set(), "finish": None, "coverage": None,
                "form": None, "shade_dir": None, "implicit": [], "qtext": context,
@@ -271,7 +296,16 @@ def _req_meta(agent, context):
                 "unsolvable": False, "mature": False, "newbie": False,
                 "long_wear": False, "seasonal": False, "negative_axes": set(),
                 "skins_stated": set()}
-        return req, meta
+    # 中文需求补 CJK 规则层抽取（extract_constraints 是英文规则，不认中文）：
+    # 否则中文多轮闸门（商品追问/对比/求助）拿到的 context 行是「未识别到明确需求」，
+    # LLM 不知道用户肤质 → 反问「皮肤偏干偏油」（2026-09-01 用户 badcase 的次生根因）。
+    try:
+        cjk = getattr(agent, "_cjk_explicit", None)
+        if cjk and _CJK.search(str(context or "")):
+            cjk(req, meta, context)
+    except Exception:
+        pass
+    return req, meta
 
 
 def _context_line(req, meta, reply_lang="zh"):
@@ -512,16 +546,110 @@ def _generate_shade(facts, context, reply_lang, shade, turn_text):
     return _generate(zh, en, f"哪款有我的色号？请诚实回答。", reply_lang)
 
 
-def _generate_help(context, turn_text, reply_lang):
-    zh = ("你是美妆导购，很会聊天。用户在求助——比如不知道怎么判断自己的色号、不知道怎么选。\n"
-          f"用户原始需求：{context}\n用户本轮说：{turn_text}\n"
+def _generate_product_qa(facts, context, turn_text, reply_lang):
+    """对已推荐商品的属性/风险追问（这三款会不会卡粉/适合干皮吗）→ 绑定真实商品数据答。
+
+    2026-09-01 用户 badcase：原 help 路径不接收推荐商品 → LLM 不知道「这三款」是哪三款，
+    反问「你手边哪几款/什么肤质」，卡粉也泛化成通用护肤知识。本函数把商品真实信息
+    （标签/评分/条数/价格/色号/差评主题）注入 prompt，并硬约束「已知的不要再反问」。
+    事实永远来自数据层，LLM 只改写语气。"""
+    zh = ("你是美妆导购，很会聊天，说话像朋友。用户在问「刚才推荐的那几款商品」的具体情况——"
+          "比如会不会卡粉、浮粉、闷痘、脱妆，适不适合他的肤质。\n"
+          "以下是这几款的【真实信息】（标签/评分/条数/价格/色号/差评主题都来自商品数据，必须属实）：\n"
+          f"{facts}\n用户已知需求：{context}\n用户本轮问：{turn_text}\n"
+          "回答结构（**精简，别啰嗦**，2026-09-01 用户定）：\n"
+          "1. 开头（只有用户问到了选色号/肤色才写）：肤色判别最多 2-3 行（看血管/首饰一两句带过，别铺开）。\n"
+          "2. 逐款（🌟 每款开头，**每款 1-2 行**）：第一句质地+妆效+适合谁；第二句评论区声音/风险"
+          "（有没有被反复吐槽卡粉等；没有就诚实说「评论区没提到」）+ 一句关键提醒。\n"
+          "3. 总结 1-2 行：直接给结论（哪款最稳/哪款小心什么/选哪款）+ 反问一句帮他收窄。\n"
+          "关键：用户问的这几款就是刚才推荐的——**绝对不要再问「你手边是哪几款」**；"
+          "用户肤质等信息在上面的「用户已知需求」里，**已知的不要再反问**。\n"
+          "只用真实数据，禁止编造评分/条数/色号/评论原话/差评主题；口语化、像朋友聊天、"
+          "不要堆满 emoji、不要像数据报表。")
+    en = ("You're a friendly beauty-shopping guide. The user is asking about the products you just "
+          f"recommended — whether they'll cake, go patchy, break out, or suit their skin.\n"
+          "Below is their REAL info (tags/rating/count/price/shade/complaint themes — from the "
+          f"catalog, must be accurate):\n{facts}\nKnown needs: {context}\nThis turn: {turn_text}\n"
+          "Structure (BE CONCISE, don't ramble):\n"
+          "1. Opening (only if the user asked about shade/undertone): shade check in at most 2-3 "
+          "lines (wrist veins / jewelry, one or two sentences, no deep dive).\n"
+          "2. Per product (start each with 🌟, **1-2 lines each**): first line = texture + finish + "
+          "who it suits; second line = the review voice / risk (any recurring complaint like "
+          "caking — say it plainly; if none, honestly say the reviews don't mention it) + one "
+          "key caveat.\n"
+          "3. Close in 1-2 lines: give the verdict (which is safest / what to watch out for / which "
+          "to pick) + one question to narrow down.\n"
+          "Key: these are exactly the products you recommended — NEVER ask 'which products do you "
+          "have'; their skin info is in 'Known needs' above — don't re-ask what's known.\n"
+          "Use ONLY the real data — never invent ratings, counts, shades, quotes, or complaint "
+          "themes. Sound like a friend, not a data sheet; don't overuse emoji.")
+    return _generate(zh, en, f"请回答用户对这几款商品的追问。", reply_lang)
+
+
+def _product_qa_fallback(agent, asins, context, reply_lang="zh"):
+    """LLM 挂了 → 确定性朋友式回答（绑定真实商品数据 + 评论区声音），绝不崩、绝不反问已知。"""
+    en = reply_lang == "en"
+    ps = []
+    for a in (asins or [])[:MAX_COMPARE]:
+        p = agent.idx.by_asin.get(a)
+        if p:
+            ps.append((a, p))
+    if not ps:
+        return _no_recs_msg(reply_lang)
+    lines = []
+    for a, p in ps:
+        title = str(p.get("title_zh") or p.get("title") or a)[:50]
+        form = str(p.get("form_tag") or "")
+        finish = str(p.get("finish_tag") or "")
+        skins = str(p.get("skin_tags") or "").replace(";", "、" if not en else ",")
+        desc = "、".join(x for x in [
+            (("质地" if not en else "texture") + f" {form}") if form else "",
+            (("妆效" if not en else "finish") + f" {finish}") if finish else "",
+            (("适合" if not en else "suits") + f" {skins}") if skins else "",
+        ] if x)
+        d = DEFECT_MAP.get(a)
+        axes = str(d["axes"]) if (d and d["axes"]) else ""
+        if axes:
+            risk = (("评论区有被反复吐槽：" + axes) if not en else
+                    ("recurring review complaints: " + axes))
+        else:
+            risk = (("评论区没被集中吐槽过这类问题" if not en else
+                     "no recurring complaints in the reviews"))
+        lines.append(f"🌟 {title}：{desc or ('未标注标签' if not en else 'no tags')}。{risk}。")
+    # 结尾：结合已知肤质给一句建议 + 反问收窄（已知的绝不反问）
+    m = re.search(r"肤质=([^、]+)", context or "")
+    if m:
+        skins_txt = m.group(1)
+        tail = ((f"结合您肤质（{skins_txt}）的话，怕卡粉就优先挑质地润一点的、"
+                 f"上妆前做好保湿打底；您最担心哪一点，我再帮您把关。") if not en else
+                (f"Given your skin ({skins_txt}), if caking is a concern, lean toward the "
+                 f"moisturizing ones and hydrate well before applying. Which concern matters "
+                 f"most — I'll take it from there."))
+    else:
+        tail = (("具体建议可以告诉我您最担心哪一点（卡粉、出油还是脱妆），我帮您重点看。")
+                if not en else
+                ("Tell me your top concern (caking, shine, or fading) and I'll dig in."))
+    return (("好嘞，咱们就看刚推荐的这几款：\n" if not en else
+             "Sure — here's the read on the picks:\n") + "\n".join(lines) + "\n" + tail)
+
+
+def _generate_help(context, turn_text, reply_lang, titles=None):
+    zh = ("你是美妆导购，很会聊天，说话像朋友。用户在求助——比如不知道怎么判断自己的色号、不知道怎么选。\n"
+          f"用户已知需求：{context}\n用户本轮说：{turn_text}\n"
+          f"上一轮推荐的商品：{' / '.join(titles) if titles else '（无）'}\n"
           "请像朋友一样给出可操作的判断方法（看手腕血管判断冷暖调、回想穿衣衬色等），"
-          "或提一两个引导性问题帮用户定位。不要急着推荐商品。语气友好，用列表+emoji。")
+          "或提一两个引导性问题帮用户定位。不要急着推荐商品。\n"
+          "注意：用户已知需求（肤质/妆效等）在上面的「用户已知需求」里，**已知的绝对不要再反问**；"
+          "用户提到的商品如果就是上一轮推荐的，直接按已知的聊，不要问「你手边是哪几款」。"
+          "语气友好亲近、口语化，不要堆满 emoji、不要像教科书。")
     en = ("You're a friendly beauty-shopping guide. The user is asking for help — e.g. how to "
-          f"figure out their shade, or how to choose.\nOriginal request: {context}\nThis turn: {turn_text}\n"
+          f"figure out their shade, or how to choose.\nKnown needs: {context}\nThis turn: {turn_text}\n"
+          f"Last recommended products: {' / '.join(titles) if titles else '(none)'}\n"
           "Give actionable advice like a friend (wrist-vein undertone test, what colors flatter them), "
-          "or ask 1-2 guiding questions to help them figure it out. Don't rush to recommend products. "
-          "Friendly, lists + emoji.")
+          "or ask 1-2 guiding questions. Don't rush to recommend products.\n"
+          "Note: their known needs are in 'Known needs' above — never re-ask what's already known; "
+          "if they mention products you recommended, talk about those directly, don't ask which ones. "
+          "Warm and conversational, not textbook-like, not emoji-heavy.")
     return _generate(zh, en, f"请帮帮我。", reply_lang)
 
 
@@ -721,6 +849,18 @@ def route(query, agent, last_asins=None, reply_lang="zh", convo=None, diag_famil
                 # LLM 挂 → 朋友式兜底（2026-08-31 用户：绝不甩结构化 facts 清单，兜底也讲人话）
                 text = _compare_fallback(agent, last_asins, reply_lang)
 
+    elif intent == "product_qa":
+        # 对已推荐商品的属性/风险追问（这三款会不会卡粉/适合干皮吗）→ 绑定商品真实数据答。
+        # 2026-09-01 用户 badcase 修复：原来这类问句被 help 接走，LLM 不知是哪三款 → 反问。
+        if not last_asins:
+            text = _no_recs_msg(reply_lang)
+        else:
+            facts = _product_facts_block(agent, last_asins, reply_lang)
+            text = _generate_product_qa(facts, ctx_line, turn_text, reply_lang)
+            if not text:
+                # LLM 挂 → 确定性朋友式兜底（绑定真实商品 + 评论区声音，不崩、不反问已知）
+                text = _product_qa_fallback(agent, last_asins, ctx_line, reply_lang)
+
     elif intent == "shade_question":
         if not last_asins:
             text = _no_recs_msg(reply_lang)
@@ -745,7 +885,7 @@ def route(query, agent, last_asins=None, reply_lang="zh", convo=None, diag_famil
         text = re.sub(r"\n?\s*(?:色号结论|shade conclusion)[^\n]*$", "", text, flags=re.I).strip()
 
     elif intent == "help":
-        text = _generate_help(ctx_line, turn_text, reply_lang) or _help_fallback(reply_lang)
+        text = _generate_help(ctx_line, turn_text, reply_lang, titles) or _help_fallback(reply_lang)
 
     elif intent == "chat":
         text = _generate_chat(turn_text, reply_lang) or _chat_fallback(reply_lang)
