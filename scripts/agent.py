@@ -405,6 +405,28 @@ class GuideAgent:
         elif re.search(r"又油又干|既油又干|同时油和干|油也干", q):
             meta["unsolvable"] = True
 
+    def _axis_rejected(self, q, word):
+        """2026-09-02 v3 triage 否定守卫：word（matte/oily/powder/stick…）是否被同小句否定/对比标记否决。
+
+        q18 教训：不能全句宽窗搜否定词——"without touch-ups — I have oily skin" 的 without 与 oily
+        隔着破折号小句，oily 是肤质声明不是被否定对象；宽窗 {0,28} 会把肤质/正意向误读成"不要该轴"。
+        故按 . , ; ! ? — – : ( ) 换行 切小句，只在目标词所在小句内、其前 ≤3 个词找否定标记；
+        "rather than X / instead of X / but not X / X over Y（X 后置=被否决）"整体视作否决。
+        """
+        q = str(q).lower().replace("’", "'")
+        word = word.lower()
+        neg_tok = (r"\b(?:not|no\b|never|without|avoid|isn'?t|is\s+not|aren'?t|are\s+not|don'?t|do\s+not|"
+                   r"doesn'?t|does\s+not|won'?t|will\s+not|can'?t|cannot|over)\b")
+        phrase = r"(?:rather\s+than|instead\s+of|but\s+not)"
+        for clause in re.split(r"[.,;!?—–:()\n]+", q):
+            if re.search(rf"{phrase}[^.,;!?—–:()\n]{{0,24}}\b{re.escape(word)}\b", clause):
+                return True
+            for m in re.finditer(rf"\b{re.escape(word)}\b", clause):
+                head = clause[:m.start()]
+                if re.search(rf"{neg_tok}(?:\s+\w+){{0,3}}\s*$", head):
+                    return True
+        return False
+
     # ------------------------------------------------------------------
     # ① 约束抽取（纯文本关键词规则，确定性；复用 intent_reasoning 场景规则）
     # ------------------------------------------------------------------
@@ -428,9 +450,17 @@ class GuideAgent:
         if re.search(r"\bacne[- ]?prone\b|\bprone to break[- ]?outs?\b|\bbreak[- ]?out[- ]?prone\b", q):
             req["hard"].add("痘痘肌")          # 与敏感肌构成双硬约束（需双标签或全肤质自证）
             meta["skins_stated"].add("痘痘肌")
-        if re.search(r"\boily\b|\boil[- ]?control\b|\bgreas", q):
+        # 肤质一词多义（2026-09-02 v3 triage q128/q68/q42/q48）："isn't oily / won't ... feel greasy"
+        # 是商品反特性不是肤质声明；"let it dry / dry climates"是动词与气候不是肤质 → 都不得抽肤质，
+        # 否则错把全库油皮/干皮品捞到前面。
+        if (re.search(r"\boily\b|\boil[- ]?control\b|\bgreas", q)
+                and not self._axis_rejected(q, "oily") and not self._axis_rejected(q, "greasy")):
             req["soft"].add("油皮"); meta["stated_skin"] = True; meta["skins_stated"].add("油皮")
-        if re.search(r"\bdry\b|\bdehydrat\b|\bflaky\b", q):
+        _dry_verb = re.search(
+            r"\b(?:let(?:ting)?\s+it\s+dry|dries?\s+(?:down|off|quickly|fast|naturally|to\s+a|within|by)\b"
+            r"|\bdry\s+(?:for|it\b|out\b|climates?|weather|air\b|heat\b|season|environment|regions?|brushes?|clean(?:ing)?))\b", q)
+        if (re.search(r"\bdehydrat\b|\bflaky\b|\bdryness\b|\bparched\b|\bdry skin\b", q)
+                or (re.search(r"\bdry\b", q) and not _dry_verb)):
             req["soft"].add("干皮"); meta["stated_skin"] = True; meta["skins_stated"].add("干皮")
         if re.search(r"\bcombination\b", q):
             req["soft"].add("混合肌"); meta["stated_skin"] = True; meta["skins_stated"].add("混合肌")
@@ -449,13 +479,17 @@ class GuideAgent:
             meta["control_oil"] = True
 
         # ---- 妆效 ----
-        if re.search(r"\bmatte\b", q):
+        # 2026-09-02 v3 triage 否定读反修复：q59"rather than a matte finish" / q129"glowing but not matte" /
+        # q45"isn't too matte" 原全被 \bmatte\b 误抽成哑光（真实用户要的是"非哑光"）→ matte 前有否定词
+        # 则不认，dewy/glow 正常接管；"natural skin tone/shade"=肤色不是妆效（q123）→ 不抽自然妆效。
+        _natural_tone = re.search(r"\bnatural\b[^.,;!?]{0,18}\b(?:tone|shade|undertone)\b", q)
+        if re.search(r"\bmatte\b", q) and not self._axis_rejected(q, "matte"):
             req["finish"] = "哑光"
         elif re.search(r"\bdewy\b", q):
             req["finish"] = "水光"
         elif re.search(r"\bglow(?:ing|y)?\b|\bradiant\b", q):
             req["finish"] = "光泽"
-        elif re.search(r"\bnatural(?:[- ]looking)?\b", q):
+        elif re.search(r"\bnatural(?:[- ]looking)?\b", q) and not _natural_tone:
             req["finish"] = "自然"
 
         # ---- 遮瑕（防色号陷阱：裸 medium/light=色号，不提取；「good/even coverage」=只要遮瑕无级别）----
@@ -469,7 +503,13 @@ class GuideAgent:
             meta["coverage_requested"] = True
 
         # ---- 质地（看 form_tag 值，不采信标题，KLAIRS 假命中教训）----
-        if re.search(r"\bpowder\b|\bmineral\b", q):
+        # 2026-09-02 v3 triage 一词多义修复：powder 做定妆/工具用法（q56/q96"without needing powder"、
+        # q86"under finishing powder"、q117"mattifying powder"）不是粉底粉状，只有 q125"a powder that blurs"
+        # 这类把粉饼当目标品才抽粉状；won't stick=动词卡粉（q126）不是棒状质地。
+        _powder_tool = (self._axis_rejected(q, "powder")
+                        or bool(re.search(r"\b(?:finishing|setting|mattifying|translucent|baking)\s+powder\b"
+                                          r"|\b(?:under|beneath|before|after|on top of|with a|with the)\b[^.,;!?—–]{0,16}\bpowder\b", q)))
+        if not _powder_tool and re.search(r"\bpowder\b|\bmineral\b", q):
             req["form"] = "粉状"
         elif re.search(r"\bliquid\b", q):
             req["form"] = "液体"
@@ -477,7 +517,8 @@ class GuideAgent:
             req["form"] = "气垫"
         elif re.search(r"\bcream\b", q):
             req["form"] = "乳霜"
-        elif re.search(r"\bstick\b", q):
+        elif re.search(r"\bstick\b", q) and not re.search(r"\bsticks?\s+(?:to|on|up|out|around)\b", q) \
+                and not self._axis_rejected(q, "stick"):
             req["form"] = "棒状"
 
         # ---- 色号方向（排除 fair share 习语；对齐 parse_query 逻辑）----
@@ -739,9 +780,15 @@ class GuideAgent:
                             key=lambda t: t[1], reverse=True)
 
         viable, excluded = [], []
+        sink_pool = []   # B 分支无该 hard 轴信息品：单独收集，最后补位（带 risk_note）
         for asin, score, reasons in scored:
             p = self.idx.by_asin[asin]
             why = []
+            p_skins = set(s for s in str(p.get("skin_tags") or "").split(";") if s)
+            # 沉底品识别（2026-09-03 hard 轴三段 B 分支）：user 有 hard 轴要求但该品缺该轴标签
+            # （能走到这里 = 未被 tag_score 的 -inf 排除 = 无该轴真雷缺陷证据 → 客观无信息）
+            sink_missing = (sorted(h for h in req["hard"] if not (p_skins & {h, "全肤质"}))
+                            if req["hard"] else [])
             # 死链拦截（2026-08-31）：链接失效（404）→ 推送前硬过滤。
             # dead_asins 由 web/harness 层传入（默认空 → eval 锚点零影响）
             if asin in meta.get("_dead", set()):
@@ -808,6 +855,11 @@ class GuideAgent:
                     excluded.append((asin, ("flagged for: " + hit_txt if self.reply_lang == "en"
                                             else "命中缺陷证据：" + hit_txt)))
                     continue
+            # B 分支沉底：无该 hard 轴信息（无缺陷证据）→ 不进精确款池，
+            # 收进 sink_pool 备用（只在精确款+fill_in 仍不足 3 时补位，带 risk_note）
+            if sink_missing:
+                sink_pool.append((asin, score, reasons, p, sink_missing))
+                continue
             viable.append((asin, score, reasons, p, why))
             if len(viable) >= n:
                 break
@@ -824,6 +876,11 @@ class GuideAgent:
                 if asin in seen:
                     continue
                 p = self.idx.by_asin[asin]
+                # fill-in 也绝不破 hard 轴（敏感痘痘肌）：无该轴信息品不参与质地放宽补位
+                # （它已在主循环收进 sink_pool，由最后一步兜底，不走 fill_in）
+                _ps = set(s for s in str(p.get("skin_tags") or "").split(";") if s)
+                if req["hard"] and any(not (_ps & {h, "全肤质"}) for h in req["hard"]):
+                    continue
                 # 安全硬约束
                 if asin in meta.get("_dead", set()):
                     continue
@@ -853,6 +910,20 @@ class GuideAgent:
                                             -c[1]))
             for asin, score, reasons, p, fills in _fill_cands[: max(0, 3 - len(viable))]:
                 viable.append((asin, score, reasons, p, ["fill_in:" + "、".join(fills)]))
+        # B 分支沉底补位（2026-09-03 hard 轴三段）：精确款 + fill_in 仍不足 3 → 才用无该轴信息品
+        # 补足推荐数；why 带 sink_hard: 标记 → run() 据此给这些品加 risk_note 风险提示（卡片）。
+        # 沉底品按原顺序（tagfirst 已按热度/分数排，负分全在尾部）取，绝不挤掉精确款。
+        if len(viable) < 3 and sink_pool:
+            _need = 3 - len(viable)
+            _seen = {a for a, *_ in viable}
+            for asin, score, reasons, p, missing in sink_pool:
+                if asin in _seen:
+                    continue
+                viable.append((asin, score, reasons, p,
+                               ["sink_hard:" + "、".join(missing)]))
+                _seen.add(asin)
+                if len(viable) >= 3:
+                    break
         return viable, excluded
 
     def decide_retry(self, req, meta, viable):
@@ -1179,6 +1250,17 @@ class GuideAgent:
             # fill_in 标记：接近款（放宽质地/遮瑕补足推荐数），回复自然呈现、不暴露「库」
             fill_in = next((w.split(":", 1)[1] for w in (why or [])
                             if w.startswith("fill_in:")), None)
+            # risk_note（hard 轴三段 C 分支，2026-09-03 用户批准）：补位进来的沉底品
+            # 客观缺少该肤质轴用户反馈 → 卡片附风险提示（只出现在覆盖品不足被补位时）
+            sink_hard = next((w.split(":", 1)[1] for w in (why or [])
+                              if w.startswith("sink_hard:")), None)
+            risk_note = None
+            if sink_hard:
+                _axes_en = " / ".join(self._tag(a.strip()) for a in sink_hard.split("、") if a.strip())
+                risk_note = (f"⚠️ This item has no {_axes_en} user feedback yet — "
+                             f"treat the match as a reference only"
+                             if self.reply_lang == "en"
+                             else f"⚠️ 该商品暂无{sink_hard}相关用户反馈，肤质匹配仅供参考")
             recommendations.append({
                 "asin": asin,
                 "title": str(p.get("title"))[:70],
@@ -1186,6 +1268,7 @@ class GuideAgent:
                 "title_zh": str(p.get("title_zh") or p.get("title"))[:70],
                 "evidence": self._build_evidence(p, reasons, req, req["budget"]),
                 "fill_in": fill_in,
+                "risk_note": risk_note,
             })
 
         # 避雷说明：被硬过滤排除的（excluded）挑前 3 条作为避雷记录

@@ -83,8 +83,8 @@ erDiagram
 | 原始值 | 标签 | 说明 |
 |---|---|---|
 | `All` / `Universal` / `all skin` | `全肤质` | 适用所有肤质 |
-| `Sensitive` | `敏感肌` | **硬约束**：Query 含此标签，候选必须适用 |
-| `Acne` / `breakout` | `痘痘肌` | **硬约束**：同上 |
+| `Sensitive` | `敏感肌` | **硬约束（2026-09-03 起三段降级）**：候选须适用；缺此标签品分三类——命中该轴 consensus 缺陷证据（刺激）= A 真雷硬踢 `-inf`；无缺陷证据 = B 客观无信息沉底 `-1000`（仅覆盖品不足时补位 + 卡片风险提示 `risk_note`） |
+| `Acne` / `breakout` | `痘痘肌` | **硬约束（2026-09-03 起三段降级）**：同上；缺标签 + 闷痘共识 = 真雷硬踢，无证据 = 沉底补位 |
 | `Oily` 单独 | `油皮` | 软偏好 |
 | `Dry` 单独 | `干皮` | 软偏好 |
 | `Combination` 单独 | `混合肌` | T区油两颊干（中性表述） |
@@ -435,7 +435,8 @@ SELECT * FROM tag_distribution WHERE tag_type = 'skin_tag';
 | **资损陷阱题（2026-08-31）**：8 题 3 类资损断言（A 报价溯源=假价不得确认/回显；B 优惠溯源=不得虚构促销；C 预算硬约束=每条推荐价 ≤ 上限×1.3）。**架构级保证**：LLM 只填约束、回复确定性从库生成→报价/优惠结构上不可能虚构。纯规则零 LLM 跑批**拒绝率 8/8=100%**（新文件不碰 eval 锚点） | `data/loss_risk_report.csv` | `scripts/loss_risk_cases.py`（陷阱题集，合成 query）+ `scripts/eval_loss_risk.py`（runner，全过 exit 0 CI 可挂） |
 | **企业级检索链路骨架（Phase-MVP，2026-09-01）**：多路召回（字段/文本/热销/语义并集）→ 路由分流（D 通道口径：结构化约束含隐式意图→tagfirst / 无约束→语义）→ 精排接口（冷启动 tagfirst，行为模型双塔预留位）→ 后置避雷/预算硬过滤。agent `_record` 新增 `route` 字段（channel + field/text/hot/vector/union 计数）→ 随埋点可观测。**config.py 收拢可调参数单一真相源**（热销分档/避雷阈值/会话预算/画像上限/语义权重/召回 top-K/精排器选择） | `data/harness_trace.jsonl`（route_trace 随 record 追加，无 key） | `scripts/recall_router.py`（新）+ `scripts/ranker.py`（新）+ `scripts/config.py`（新）+ `scripts/agent.py`（`_retrieve` 接线） |
 | **数据看板（2026-09-01）**：dashboard.py 读 `harness_trace.jsonl` 全链路埋点 → 聚合 → 自包含静态页（检索耗时分布 / 路由通道分布 / 追问·兜底·降级率 / 意图·语言 / 预算护栏 / 热推 Top-10；gate_rejected/run_error 事件行单计） | `data/dashboard.html`（生成产物，静态） | `scripts/dashboard.py`（新，零依赖只读） |
-| **存储接口抽象（2026-09-01）**：KVBackend 接口（get_all/save_all）→ JsonKVBackend（现行，JSON 文件）→ RedisKVBackend（预留位，部署传 redis 客户端即切换）；ProfileStore 承接画像 get/touch + LRU 淘汰，web_server 只做薄委托（锁语义不变：锁在 web 层，store 内不加锁） | `data/user_profiles.json`（JsonKVBackend 后端，格式不变） | `scripts/store.py`（新）+ `scripts/web_server.py`（画像四函数改薄委托） |
+| **存储接口抽象（2026-09-01；2026-09-03 演进第 1/3 段）**：KVBackend 接口 = per-key 三件套（get/set/delete，主路径一人一条）+ 整表两件套（get_all/save_all，仅 LRU 淘汰/迁移等需全表遍历场景）；JsonKVBackend（现行 JSON 文件：单文件=整表，per-key 底层整读写，诚实注 demo 规模足够）；RedisKVBackend（预留位：per-key string、热冷各一 key 空间，部署传 client 即切换）；ProfileStore 承接画像 get/touch + LRU，web_server 只做薄委托（锁语义不变：锁在 web 层，store 内不加锁） | `data/user_profiles.json`（JsonKVBackend 后端） | `scripts/store.py` + `scripts/web_server.py` |
+| **记忆层热冷分离（2026-09-03，演进第 3 段前奏）**：画像拆热/冷双后端——热 = lang/skins/last_visit/created（`user_profiles.json`，每请求读）；冷 = convo 对话记忆（`user_convo.json` 独立文件、低频读、可丢，将来 Redis 下可带 TTL）；**写对话记忆不再背着画像整表落盘**；LRU 淘汰热用户时同步清其冷 convo（不留孤儿）；启动时 `ProfileStore.migrate()` 一次性把旧画像内嵌 convo 拆到冷表（幂等，14 uids 实测：u_zncd1et9/u_test_concise 两画像 convo 无损搬移） | `data/user_profiles.json`（热）+ `data/user_convo.json`（冷，新增） | `scripts/store.py` + `scripts/web_server.py`（handle_chat/handle_profile 拆热冷委托，`migrate()` 放 `main()`） |
 | **行为精排演进位（2026-09-01）**：BehaviorRanker（LambdaRank 双塔：曝光/点击/转化/CTR/加购率/GMV/价格带拟合/复购/差评规避后转化）从冷启动 → 行为模型的完整路线图（埋点漏斗→训练→shadow→重训闭环），数据补齐即 `config.RANKER="behavior"` 一行切换 | —（纯文档） | `docs/enterprise_evolution.md`（新） |
 | 双击启动 AI 导购（CRLF + python 回退链：PATH python 带 pandas → tradingagents → Anaconda base） | — | `启动AI导购.bat`（2026-08-29，UTF-8 no BOM + chcp 65001；`python` 裸名在 cmd 会命中 WindowsApps 0 字节 stub，回退链绕过） |
 

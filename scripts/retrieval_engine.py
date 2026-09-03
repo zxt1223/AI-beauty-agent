@@ -22,6 +22,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from defect_consensus import consensus_axes  # 避雷共识口径唯一（同 agent._load_defect）
+
 ROOT = Path(r"C:\Users\Lenovo\Desktop\beauty-agent")
 
 SKIN_MAP = {"oily": "油皮", "dry": "干皮", "sensitive": "敏感肌", "combination": "混合肌",
@@ -31,6 +33,15 @@ FINISH_MAP = {"matte": "哑光", "dewy": "水光", "glow": "光泽", "radiant": 
 COV_MAP = {"full": "高遮瑕", "medium": "中度遮瑕", "light": "轻遮瑕", "sheer": "轻遮瑕"}
 FORM_MAP = {"liquid": "液体", "cream": "乳霜", "powder": "粉状", "stick": "棒状", "cushion": "气垫"}
 HARD_SKIN = {"敏感肌", "痘痘肌"}
+
+# ---- hard 轴三段降级（2026-09-03 用户批准：A 真雷硬踢 / B 无信息沉底 / C 卡片风险提示）----
+# B 沉底分：有限远负值，保证永远排在所有正常标签分之后（tagfirst 沉底），
+# 但不会被 score_candidates 当 -inf 排除——仅当覆盖品不足时才会补位进推荐。
+HARD_SINK_SCORE = -1000.0
+# A 真雷判定：该 hard 轴「缺少适用标签」且命中对应 consensus 缺陷轴 → 仍 -inf 排除。
+# 敏感肌缺标签 + 刺激共识 = 真雷（不适合敏感肌，绝不因缺标签放行）；
+# 痘痘肌缺标签 + 闷痘共识 = 真雷。卡粉/脱妆/油腻非肤质耐受轴，不映射（属普适质量问题）。
+HARD_AXIS_DEFECT = {"敏感肌": {"刺激"}, "痘痘肌": {"闷痘"}}
 
 # 隐式意图 → 可检索信号（段 A 基础版；对齐 intent_reasoning_rules.md）
 # 2026-08-27 修复：防晒/防水 lambda 签名原为 `lambda t`（期望字符串），但 tag_score 调用
@@ -75,6 +86,27 @@ class BM25:
         return s
 
 
+_DEFECT_MAP_CACHE = None   # 进程级懒缓存：{asin: set(共识缺陷轴)}（同 agent._load_defect 口径）
+
+
+def _load_defect_map():
+    """product_defect_evidence.csv → {asin: set(达标硬规则的缺陷轴)}。
+    与 agent._load_defect 完全同口径（consensus_axes），进程内只读一次。
+    供 hard 轴三段判定（retrieval_engine 需要独立持有——eval_runner 池直排绕过 agent）。"""
+    global _DEFECT_MAP_CACHE
+    if _DEFECT_MAP_CACHE is not None:
+        return _DEFECT_MAP_CACHE
+    p = ROOT / "data" / "product_defect_evidence.csv"
+    if not p.exists():
+        _DEFECT_MAP_CACHE = {}
+        return _DEFECT_MAP_CACHE
+    df = pd.read_csv(p, encoding="utf-8-sig").fillna("")
+    _DEFECT_MAP_CACHE = {str(r["parent_asin"]): axes
+                         for _, r in df.iterrows()
+                         if (axes := consensus_axes(r.get("defect_scores"), r.get("n_neg_reviews")))}
+    return _DEFECT_MAP_CACHE
+
+
 class ProductIndex:
     def __init__(self, csv_path=None):
         csv_path = csv_path or (ROOT / "data" / "products_clean.csv")
@@ -85,6 +117,7 @@ class ProductIndex:
         self.doc_text = [f'{p["title"]} {p["brand"]}' for p in self.records]
         self.bm25 = BM25(self.doc_text)
         self.index_of = {p["parent_asin"]: i for i, p in enumerate(self.records)}
+        self._defect_map = _load_defect_map()   # 进程级共享缓存（懒加载一次）
         self._encoder = None       # 段 B：bge 编码器（懒加载）
         self._doc_vecs = None      # 段 B：商品文档向量
 
@@ -198,14 +231,34 @@ class ProductIndex:
         req["vec_text"] = str(row.get("query_rewrite") or "").strip() or str(row["query"])
         return req
 
+    # ---- 硬约束三段判定（2026-09-03 用户批准：A 真雷硬踢 / B 无信息沉底 / C 卡片提示）----
+    def hard_verdict(self, req, p):
+        """hard 轴产品级判定，返回 ("ok" | "exclude" | "sink", missing_axes)。
+        - ok       ：商品含该 hard 轴标签或全肤质 → 正常参与打分。
+        - exclude  ：缺该 hard 轴标签 且 命中该轴对应 consensus 缺陷轴（敏感肌→刺激 /
+                     痘痘肌→闷痘 = 真实避雷证据）→ A 真雷，仍硬踢（-inf）。
+        - sink     ：缺该 hard 轴标签 且 无缺陷证据 → B 客观「缺少该轴信息」→ 沉底降权，
+                     仅当整库覆盖品不足时才补位进推荐（C：卡片风险提示）。
+        tag_score 与 RecallRouter.recall_field 共用 → 召回层与打分层不漂移。"""
+        p_skins = set(s for s in str(p.get("skin_tags") or "").split(";") if s)
+        missing_hard = [h for h in req.get("hard") or () if not (p_skins & {h, "全肤质"})]
+        if not missing_hard:
+            return "ok", []
+        _de = self._defect_map.get(str(p.get("parent_asin")), set())
+        if any(HARD_AXIS_DEFECT.get(h, set()) & _de for h in missing_hard):
+            return "exclude", missing_hard   # A 真雷：不因缺标签放行
+        return "sink", missing_hard          # B 无信息：沉底不排除
+
     # ---- 标签匹配分（知识分层：逐轴可审计 + 置信度降权） ----
     def tag_score(self, req, p):
         if not req:
             return 0.0, []
-        p_skins = set(s for s in str(p.get("skin_tags") or "").split(";") if s)
-        # 硬约束：敏感肌/痘痘肌必须适用，否则直接排除
-        if not all(p_skins & {h, "全肤质"} for h in req["hard"]):
+        verdict, _missing = self.hard_verdict(req, p)
+        if verdict == "exclude":
             return float("-inf"), ["硬约束排除"]
+        if verdict == "sink":
+            return HARD_SINK_SCORE, []
+        p_skins = set(s for s in str(p.get("skin_tags") or "").split(";") if s)
         score, reasons = 0.0, []
         # 肤质软偏好（2026-08-31 用户定：肤质是软约束，权重排序不硬剔）。
         # 冬混干夏混油用户也能用中性/混合肌标定款 → 兼容加分（比全肤质低一档，比不匹配高）。
@@ -304,7 +357,8 @@ class ProductIndex:
                     continue
                 ts, reasons = self.tag_score(req, p)
                 if ts == float("-inf"):
-                    continue  # 硬约束排除
+                    continue  # A 分支硬排除（真雷：缺标签且有缺陷证据）
+                # B 分支 SINK（-1000）不排除 → 保留排序尾部（沉底），覆盖品不足才轮到它
                 rows.append((a, ts, self.heat_score(p),
                              self.bm25.score(req["qtext"], self.index_of[a]), reasons))
             rows.sort(key=lambda r: (r[1], r[2], r[3]), reverse=True)
@@ -320,8 +374,10 @@ class ProductIndex:
                 continue
             bm = self.bm25.score(req["qtext"], self.index_of[a])
             ts, reasons = self.tag_score(req, p)
-            if ts == float("-inf"):
-                continue  # 硬约束排除
+            if ts == float("-inf") or ts == HARD_SINK_SCORE:
+                # 硬排除（A 真雷）与 SINK（B 无信息）都不进归一化通道——
+                # -1000 会击穿 min-max 归一化；非 tagfirst 模式本就无 hard 轴语义
+                continue
             vec = float(qv @ self._doc_vecs[self.index_of[a]]) if qv is not None else 0.0
             rows.append({"asin": a, "bm": bm, "ts": ts, "vec": vec,
                          "heat": self.heat_score(p), "reasons": reasons})

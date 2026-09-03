@@ -9,11 +9,15 @@ models/
 
 # ===== 运行态数据 / 缓存 / 用户画像（本地运行自动生成）=====
 data/user_profiles.json
+data/user_convo.json
 data/harness_trace.jsonl
 data/llm_cache.json
 data/title_translation_cache.json
 data/translate_cache.json
 data/*.log
+# 改前备份与一次性排查残留，从不入库
+data/backup/
+data/v3_triage_askmis.csv
 
 # ===== 编译 / 调试残留 =====
 __pycache__/

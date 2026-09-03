@@ -44,7 +44,7 @@
 - 指标：MRR 0.90-0.91、nDCG@K 0.90-0.91、No-answer 100%、Poisoning Block 100%
 - Vector-only 因默认无 embedding 模型 → **保留为诊断结果，不计入门禁**（诚实标注）
 
-**诚实边界**：README 明确「人工 GOLD 数据集门禁未完成」；「简历不得写已达到 Gorgias/Zendesk 商业成熟度」——**不把 Fixture 冒充生产接入**。
+**诚实边界**：README 明确「人工 GOLD 数据集门禁未完成」；并提醒「勿对外宣称已达到 Gorgias/Zendesk 商业成熟度」——**不把 Fixture 冒充生产接入**。
 
 ### 2.4 数据与种子
 - Flyway 自动迁移 MySQL + PostgreSQL/pgvector，加载 2 租户/10 客户/20 商品/30 订单/政策知识/评测数据

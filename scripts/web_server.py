@@ -40,10 +40,12 @@ INDEX_HTML = ROOT / "web" / "index.html"
 HOST = "127.0.0.1"
 PORT = 7860
 FEEDBACK = ROOT / "data" / "ui_feedback.jsonl"  # 用户反馈落盘（运行时零依赖，不写 MySQL）
-PROFILE = ROOT / "data" / "user_profiles.json"  # 跨会话用户画像（匿名 userId 键控）
-# 存储接口抽象（store.py）：业务代码只依赖 KVBackend 接口，换存储（JSON→Redis）不换业务代码。
+PROFILE = ROOT / "data" / "user_profiles.json"  # 热画像：匿名 userId → {lang, skins, last_visit, created}
+CONVO = ROOT / "data" / "user_convo.json"       # 冷对话记忆：convo 独立文件（热冷分离，2026-09-03）
+# 存储接口抽象（store.py）：业务代码只依赖 KVBackend/ProfileStore，换存储（JSON→Redis）不换业务代码。
 from store import ProfileStore, JsonKVBackend    # noqa: E402
-_profile_store = ProfileStore(JsonKVBackend(PROFILE))  # 画像后端；锁在 web 层持有
+# 热冷双后端：热=画像字段（每请求读），冷=convo（独立文件、低频读、可丢；随热画像 LRU 一起淘汰）
+_profile_store = ProfileStore(JsonKVBackend(PROFILE), JsonKVBackend(CONVO))
 
 # 多语种分层路由（方案1）：英文→规则 / 中文→hybrid / 其他语种→LLM 翻译成英文→规则。
 # 前端不感知模式，用户只管说需求。lang_router.route 返回 (mode, query, lang, translated)。
@@ -59,31 +61,35 @@ _harness = Harness()                            # 驾驭层单例（会话预算
 
 
 # ---------------------------------------------------------------------------
-# 跨会话用户画像（data/user_profiles.json，_lock 内读写）
-#   {uid: {"lang": "zh|en|None", "skins": [...], "last_visit": "...", "created": "..."}}
-#   lang=最近一次回复语言（zh/en）；skins=用户明确说过的肤质（中文标签，最近一次显式声明覆盖）。
+# 跨会话用户画像（热 user_profiles.json + 冷 user_convo.json，_lock 内读写）
+#   热 {uid: {lang, skins, last_visit, created}}——每请求读；冷 {uid: convo}——独立文件低频读。
+#   lang=最近一次回复语言（zh/en）；skins=用户明确说过的肤质（最近一次显式声明覆盖）；
+#   convo=压缩对话记忆（_store_convo 产出）——拆到冷表后，写对话记忆不再背着画像整表落盘。
 #   匿名 + 无 key/无敏感数据 → 用户画像数据层 + 匿名隐私。
 # ---------------------------------------------------------------------------
-def _load_profiles():
-    """整表读取（薄委托 ProfileStore.all）。调用方须持 _lock。"""
-    return _profile_store.all()
-
-
-def _save_profiles(profiles):
-    """整表覆盖落盘（薄委托）。调用方须持 _lock。"""
-    _profile_store.save_all(profiles)
-
-
 def _get_profile(uid):
+    """热画像（lang/skins/last_visit/created）。调用方须持 _lock。"""
     if not uid:
         return None
     return _profile_store.get(uid)
 
 
 def _touch(uid, **updates):
-    """加载 → 建/改 → 淘汰超限 → 落盘，返回该用户最新画像。调用方须持 _lock。
-    逻辑在 store.ProfileStore.touch（含 MAX_PROFILES 淘汰），此处只做薄委托。"""
+    """热画像更新：建/改 → LRU 淘汰超限 → 落盘，返回最新热画像。调用方须持 _lock。
+    只收热字段（lang/skins/last_visit…）；convo 请走 _save_convo（热冷分离，2026-09-03）。"""
     return _profile_store.touch(uid, **updates)
+
+
+def _get_convo(uid):
+    """冷对话记忆（独立文件）。调用方须持 _lock。"""
+    if not uid:
+        return None
+    return _profile_store.get_convo(uid)
+
+
+def _save_convo(uid, convo):
+    """冷对话记忆单键落盘（独立文件）。调用方须持 _lock。"""
+    _profile_store.save_convo(uid, convo)
 
 
 def _same_lang(plang, qlang):
@@ -113,8 +119,9 @@ def get_gate():
 
 def _store_convo(agent, query, convo, ai_text, diag_family=None):
     """压缩对话记忆（结构化，2026-08-31 用户定）：原始需求 + 抽取约束 + 最近 N 轮双方对话
-    + 诊断色号家族。每轮落盘（user_profiles.json 的 convo 字段），换浏览器重开也记得。
-    这是「联系上下文」的数据层：闸门/推荐器都从这取数，不再靠前端拼长字符串。"""
+    + 诊断色号家族。每轮落盘到冷文件 user_convo.json（2026-09-03 热冷分离后 convo 不再
+    内嵌画像），换浏览器重开也记得。这是「联系上下文」的数据层：闸门/推荐器都从这取数，
+    不再靠前端拼长字符串。"""
     user_all = str(query or "")
     orig = user_all.split("User says:")[0].strip()
     req = {}
@@ -170,7 +177,7 @@ def handle_chat(payload):
     # 闸门因此看得到「AI 上一条说了什么」→ 系统化识别「用户回答 AI 的提问」（诊断续答等），
     # 不再逐个加关键词。同时读取上次压缩记忆（原始需求/约束/诊断色号家族）供确认轮注入。
     convo = payload.get("convo") or []
-    mem = ((profile or {}).get("convo") or {}) if uid else {}
+    mem = (_get_convo(uid) or {}) if uid else {}   # 冷对话记忆（独立文件；热画像已不含 convo）
     diag_family = mem.get("diag_family")
 
     # ---- 多轮追问 → 对话意图闸门（Harness「工具拦截 + 置信度分支」落地）----
@@ -191,17 +198,17 @@ def handle_chat(payload):
                     q = (orig + f"，色号{family}") if family else orig
                 with _lock:
                     if uid:
-                        _touch(uid, last_visit=time.strftime("%Y-%m-%d %H:%M:%S"),
-                               convo=_store_convo(agent, query, convo,
-                                                  gate.get("text") or "",
-                                                  diag_family=family))
+                        _touch(uid, last_visit=time.strftime("%Y-%m-%d %H:%M:%S"))
+                        _save_convo(uid, _store_convo(agent, query, convo,
+                                                      gate.get("text") or "",
+                                                      diag_family=family))
             else:
                 with _lock:
                     if uid:
-                        _touch(uid, last_visit=time.strftime("%Y-%m-%d %H:%M:%S"),
-                               convo=_store_convo(agent, query, convo,
-                                                  gate.get("text") or "",
-                                                  diag_family=gate.get("shade_family")))
+                        _touch(uid, last_visit=time.strftime("%Y-%m-%d %H:%M:%S"))
+                        _save_convo(uid, _store_convo(agent, query, convo,
+                                                      gate.get("text") or "",
+                                                      diag_family=gate.get("shade_family")))
                 return {
                     "gate": gate,
                     "mode": mode,
@@ -232,8 +239,8 @@ def handle_chat(payload):
         if "error" in h:        # 权限门拦截（如 query 超长）——不调 agent，直接回
             return {"error": h["error"], "mode": mode}
         rec = h["record"]
-        # 更新画像：本轮用户明确说的肤质覆盖记忆；新意图才更新语言记忆；
-        # 对话记忆（压缩）每轮落盘：含软追问（AI 上一条问了什么，供下轮闸门看上下文）
+        # 更新画像（热冷分离，2026-09-03）：热=肤质覆盖/语言/最近访问 → touch；
+        # 冷=压缩对话记忆（convo 独立文件低频写——写对话不再背着画像整表一起落盘）。
         if uid:
             ai_text = str(rec.get("reply") or "")
             sq = (rec.get("soft_question") or {}).get("text")
@@ -243,13 +250,14 @@ def handle_chat(payload):
             # 否则沿用旧诊断家族（会话内自动带，2026-08-31 用户）。
             fam_fwd = ((rec.get("constraints") or {}).get("shade_family")
                        or (mem or {}).get("diag_family"))
-            upd = {"last_visit": time.strftime("%Y-%m-%d %H:%M:%S"),
-                   "convo": _store_convo(agent, query, convo, ai_text, diag_family=fam_fwd)}
+            upd = {"last_visit": time.strftime("%Y-%m-%d %H:%M:%S")}
             if rec.get("skins_stated"):
                 upd["skins"] = rec["skins_stated"]
             if not is_followup:
                 upd["lang"] = reply_lang
             profile = _touch(uid, **upd)
+            _save_convo(uid, _store_convo(agent, query, convo, ai_text,
+                                          diag_family=fam_fwd))
     asked = rec["ask"]["decision"] in ("ask_all", "ask_first")
     return {
         "rec": rec,
@@ -275,17 +283,9 @@ def handle_profile(payload):
         return {"error": "缺少 user_id"}
     update = payload.get("update") or {}
     with _lock:
-        profiles = _load_profiles()
-        p = profiles.get(uid)
-        if p is None:
-            p = {"lang": None, "skins": [],
-                 "created": time.strftime("%Y-%m-%d %H:%M:%S")}
-            profiles[uid] = p
-        for k in ("lang", "skins"):
-            if k in update:
-                p[k] = update[k]
-        p["last_visit"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        _save_profiles(profiles)
+        upd = {k: update[k] for k in ("lang", "skins") if k in update}
+        upd["last_visit"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        p = _touch(uid, **upd)   # per-key：已有用户只改热字段，不碰冷 convo
         return {"ok": True, "profile": p}
 
 
@@ -390,6 +390,8 @@ def main():
     print("   驾驭层：权限门 → 会话预算（LLM 超限降级规则）→ 医疗护栏 → search_note → 埋点")
     print("   停止：Ctrl+C")
     print("=" * 56)
+    # 一次性迁移（幂等）：旧 user_profiles.json 内嵌的 convo → 拆到 user_convo.json 冷表
+    _profile_store.migrate()
     # 预建两个 Agent：索引构建（~秒级）放启动时，避免首问冷启动卡顿
     try:
         get_agent("rule", "en")

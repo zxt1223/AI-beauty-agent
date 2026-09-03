@@ -56,16 +56,18 @@ class RecallRouter:
 
     # ------------------------------------------------------------------ 召回 ----
     def recall_field(self, req):
-        """字段路：硬约束（敏感肌/痘痘肌必须适用）通过即全收。
-        等价 tag_score 硬排除 → 小库≈全库，排序结果与全库 tagfirst 字节级一致；
-        海量数据时此路做属性粗筛。"""
+        """字段路：hard 轴三段判定（A 真雷踢 / B 无信息沉底）下通过即全收。
+        与 ProductIndex.hard_verdict 共用 → 召回层与打分层不漂移：
+          - ok / sink（无该轴信息且无缺陷证据）→ 放行进候选池（sink 由 tag_score 沉底）
+          - exclude（真雷：缺标签且有该轴缺陷 consensus）→ 仍拦在召回层（与 -inf 一致）
+        小库≈全库，排序结果与全库 tagfirst 字节级一致；海量数据时此路做属性粗筛。"""
         hard = set(req.get("hard") or ())
         if not hard:
             return list(self.idx.by_asin)
         out = []
         for a, p in self.idx.by_asin.items():
-            p_skins = set(s for s in str(p.get("skin_tags") or "").split(";") if s)
-            if all(p_skins & {h, "全肤质"} for h in hard):
+            verdict, _missing = self.idx.hard_verdict(req, p)
+            if verdict != "exclude":
                 out.append(a)
         return out
 

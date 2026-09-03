@@ -50,7 +50,7 @@
 
 ## ⑤ 运行时状态（不入库；可重建/含运行时数据）
 
-- `user_profiles.json` / `harness_trace.jsonl` / `ui_feedback.jsonl` —— 画像/埋点/反馈
+- `user_profiles.json`（热画像：lang/skins/last_visit）+ `user_convo.json`（冷 convo 对话记忆，2026-09-03 热冷分离拆出） / `harness_trace.jsonl` / `ui_feedback.jsonl` —— 画像/埋点/反馈
 - `llm_cache.json` / `title_translation_cache.json` / `translate_cache.json` —— 缓存（省调用）
 
 ## ⑥ 过程文件（`_` 前缀，临时中间产物，可删）

@@ -65,6 +65,7 @@
   .heat { color: var(--muted); font-size: 11px; }
   .citation { font-size: 11px; color: var(--accent); }
   .honest { font-size: 11px; color: var(--warn); }
+  .risk { font-size: 11px; color: var(--warn); font-weight: 600; }
   .card a { color: var(--accent); text-decoration: none; font-size: 11px; }
   .card a:hover { text-decoration: underline; }
 
@@ -221,6 +222,8 @@ function productCards(rec){
     else if (e.budget_status === "待核实") badge = `<span class="badge wait">待核实</span>`;
     const asin = esc(r.asin);
     const honest = (e.honest||[]).map(h => `<div class="honest">⚠️ ${esc(h)}</div>`).join("");
+    // 2026-09-03 hard 轴 C 分支：沉底补位品附「缺少肤质反馈」风险提示（双语小字）
+    const riskNote = r.risk_note ? `<div class="risk">${esc(r.risk_note)}</div>` : "";
     // 缺价不显示（后端已把 e.price 置空），绝不出「价格待核实」
     const priceHtml = e.price ? `<span>${esc(e.price)}</span>` : "";
     return `<div class="card">
@@ -230,6 +233,7 @@ function productCards(rec){
       <div class="row2">${priceHtml}${badge}<span>${esc(e.rating)}</span>${heatBadge(e.heat)}</div>
       <div class="citation">${esc(e.citation)}</div>
       ${honest}
+      ${riskNote}
       <a href="https://www.amazon.com/dp/${asin}" target="_blank" rel="noopener">🛒 查看商品 →</a>
     </div>`;
   }).join("");

@@ -42,6 +42,7 @@ products 原始清洗（clean_products.py）
 
 - 库内商品多为几年前录入，**标题/描述无该轴线索的旧商品无法人工标注** → 只对含线索的 gold/关键商品精标，其余保持「未标」。
 - **「未标」≠「不适用」**：Agent 检索时未标商品不因缺标签被误排，靠诚实规则兜底（推荐不硬编「高遮瑕」这类它证明不了的话）。
+- **hard 轴（敏感肌/痘痘肌）未标的细分（2026-09-03 三段降级）**：未标≠不适用在此处细化为「未标 ≠ 真雷也 ≠ 适用」——缺该轴标签且命中该轴 consensus 缺陷证据（敏感肌→刺激 / 痘痘肌→闷痘）= **真雷硬踢**（绝不因缺标签放行）；无缺陷证据 = **客观无该轴信息 → 沉底不排除**，仅在整库覆盖品不足时补位进推荐、卡片附「暂无该肤质用户反馈」风险提示。软轴未标照旧不参与加分（不误排）；hard 轴此前对缺标签一律 `-inf` 排除的「一刀切」改为三段后，无证据缺标签品不再被误杀，与「未标≠不适用」诚实原则对齐。
 - 对外口径：**「标签覆盖率 36.2% 是数据天花板下的诚实记录——宁可留白让 Agent 诚实说'不确定'，也不拍脑袋补标签」**。
 
 ## 五、QA 与复核
@@ -63,10 +64,28 @@ products 原始清洗（clean_products.py）
 | ②精标补丁 | apply_label_patch 人工补空 14（coverage 36.2%）+ 4 肤质追加 | 2026-08-28 |
 | shade_tag v12 | 色号多桶（覆盖 64.9%） | — |
 | skin_tags 复合 | 复合肤质细粒度（混油/混干） | — |
+| ③v3 标签缺口回填 | `apply_label_patch_v3.py` 人工逐评语核验 17 品 32 项（finish/form 新维度+source=manual），v3 首答 26.7%→41.4% | 2026-09-02 |
+
+## 六之二、③v3 标签缺口回填（2026-09-02）
+
+背景：v3 评测集（159 条）很多 gold 品真实标签欠标——结构化字段（title/details）缺失，但用户评语里有干净证据。
+
+流程（与 ② 同安全模式）：
+1. `_label_gap.py`（临时）对 v3 首答 miss 逐条生成缺口清单 → `data/_label_gap_checklist.csv`（33 条）。
+2. **逐条打开原始评语人工核验**，过滤三类假阳性（不补）：关键词命中但语境反证（q117/q120/q126/q114）、相邻谱系用词不同源（水光/光泽/自然，q47/q48/q49/q59/q92）、无断言（q67/q70/q122）。
+3. `apply_label_patch_v3.py` 落库：肤质追加 / 遮瑕补空 / **妆效补空（finish_type_source=manual，新维度）** / **质地纠正（form_tag 乳霜→气垫，仅当现值=预期 from，新维度）** / 整字段替换（假阳性纠正）。先备份再写 CSV，之后 `load_mysql.py` 双写。
+
+本轮 17 品 32 项（VELEY 回撤见下），含 8 条 hard 轴（敏感肌/痘痘肌）-inf 排除行的方案①补标——8 行源评语全有干净敏感/痘肌证据，无一行需要「缺信息→降权」分支。
+
+**锚点碰撞决策记录**（重要教训）：
+- VELY Perfect Cover（B079XW1XJF）加 [油皮] 诚实正确（q101「perfect for oily skin」），但它同时是**锚点 q14 的 decoy**，加标签后 soft 精确 +2 排到 #3、把 gold（Rimmel）挤到 #4 → 锚点 94.7%→89.5%。**红线优先：回撤 VELY 油皮**，q101 延期（待锚点答案集更新后）。
+- Palladio（B00P7COT6M）：title「Dual **Wet & Dry**」被误读成肤质 Dry（标题关键字陷阱假阳性）。原想做 干皮→油皮 整替换，但 **q148（v3）的 gold 正是 Palladio 且 gold 注解写死 [肤质:干皮]**——替换会把 gold 顶掉。修正为**追加** → [干皮;油皮]：保留 gold 依赖的干皮信号（有 gold 注解背书），同时加 q106 真实油皮证据。
+- 教训：**补标签优先按用户批准的「追加」语义执行**；整字段替换（即使基于可靠假阳性证据）会与依赖旧标签的 gold 行冲突，需先查该品是否在别处当 gold。
 
 ## 七、相关文件
 
 - 表结构真相源：[database_schema.md](database_schema.md)
 - 标签/评测口径：[metrics_glossary.md](metrics_glossary.md)（§四.8 覆盖口径）
-- 生产脚本：`clean_products.py` / `shade_tag_extract.py` / `coverage_extract.py` / `sim_label_patch.py` / `apply_label_patch.py` / `load_mysql.py`
+- 生产脚本：`clean_products.py` / `shade_tag_extract.py` / `coverage_extract.py` / `sim_label_patch.py` / `apply_label_patch.py` / `apply_label_patch_v3.py` / `load_mysql.py`
+- ③回填存档：`data/backup/products_clean_pre_patch3_*.csv`（回滚用）；缺口清单 `data/_label_gap_checklist.csv`
 - 评测联动：`calibrate_gold.py` / `prep_human_gold_check.py` / `eval_runner.py`
